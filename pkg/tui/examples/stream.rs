@@ -3,7 +3,7 @@
 //! Background task pushes 5 lines every 16ms (~300 lines/sec).
 //! Type in the input row, Enter to send, Esc/Ctrl-C to quit.
 
-use tau_tui_next::*;
+use mage_tui::*;
 use tokio::sync::mpsc;
 
 struct StreamApp {
@@ -19,7 +19,7 @@ enum Msg {
 impl App for StreamApp {
     type Message = Msg;
 
-    fn render(&mut self, r: &mut tau_tui_next::renderer::Renderer) {
+    fn render(&mut self, r: &mut mage_tui::renderer::Renderer) {
         r.push_line(format!(
             "\x1b[1m\x1b[36mstreaming log\x1b[0m  ({} lines)",
             self.lines.len(),

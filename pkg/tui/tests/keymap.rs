@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use tau_tui_next::{alt, ch, ctrl, f, Keymap, DOWN, ESC, LEFT, UP};
+use mage_tui::{alt, ch, ctrl, f, Keymap, DOWN, ESC, LEFT, UP};
 
 fn ev(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
     KeyEvent {

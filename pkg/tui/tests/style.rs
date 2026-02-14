@@ -1,5 +1,5 @@
-use tau_tui_next::style::{Color, Style, StyleStack, Theme, ThemeColor};
-use tau_tui_next::ansi::{apply_sgr, RESET};
+use mage_tui::style::{Color, Style, StyleStack, Theme, ThemeColor};
+use mage_tui::ansi::{apply_sgr, RESET};
 
 // ── Style builder / basic tests ──────────────────────────────────
 

@@ -1,6 +1,6 @@
 //! Minimal counter — Up/Down to change, q/Esc/Ctrl-C to quit.
 
-use tau_tui_next::*;
+use mage_tui::*;
 use tokio::sync::mpsc;
 
 struct Counter {
@@ -22,7 +22,7 @@ enum Msg {
 impl App for Counter {
     type Message = Msg;
 
-    fn render(&mut self, r: &mut tau_tui_next::renderer::Renderer) {
+    fn render(&mut self, r: &mut mage_tui::renderer::Renderer) {
         r.push_blank();
         r.push_line(format!("\x1b[1m\x1b[36mcounter demo\x1b[0m  (tick {})", self.ticks));
         r.push_blank();

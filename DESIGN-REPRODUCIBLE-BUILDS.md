@@ -46,7 +46,7 @@ The bundle hash is the single identity that drives everything downstream:
   Petname seed:             hash bytes seed the petname generator
   Reproducibility:          same hash = same inputs = same binary
 
-The hash is a SHA-256 digest of content only. No paths, no timestamps, no
+The hash is a SHA-256 digest of content only, prefixed with `sha256:`. No paths, no timestamps, no
 machine-specific information.
 
 
@@ -123,7 +123,7 @@ Pseudocode:
           }
       }
 
-      format!("{:x}", h.finalize())
+      format!("sha256:{:x}", h.finalize())
   }
 
 

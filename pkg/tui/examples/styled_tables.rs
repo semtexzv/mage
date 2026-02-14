@@ -2,10 +2,10 @@
 //! background fills, and inline styles at various terminal widths.
 //! Resize-aware TUI. Press q or Esc to quit.
 
-use tau_tui_next::renderer::Renderer;
-use tau_tui_next::style::{Color, Style};
-use tau_tui_next::ansi::visible_width;
-use tau_tui_next::*;
+use mage_tui::renderer::Renderer;
+use mage_tui::style::{Color, Style};
+use mage_tui::ansi::visible_width;
+use mage_tui::*;
 
 // ── Sample tables ───────────────────────────────────────────────
 
@@ -78,7 +78,7 @@ fn build_sections(term_w: u16) -> Vec<String> {
 
     let render_lines = |lines: &[String], w: u16| -> Vec<String> {
         let mut r = Renderer::new();
-        let mut term = tau_tui_next::testutil::TestTerminal::new(w, 200);
+        let mut term = mage_tui::testutil::TestTerminal::new(w, 200);
         r.begin_frame(w, 200);
         for l in lines {
             r.push_line(l.as_str());

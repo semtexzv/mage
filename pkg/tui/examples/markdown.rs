@@ -1,7 +1,7 @@
 //! Renders a markdown document in a TUI. Resize-aware.
 //! Press q or Esc to quit.
 
-use tau_tui_next::*;
+use mage_tui::*;
 
 const SAMPLE: &str = r#"# Markdown Renderer
 

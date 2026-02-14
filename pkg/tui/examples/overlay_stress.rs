@@ -6,9 +6,9 @@
 //!
 //! Press q or Esc to quit. Up/Down navigates the overlay.
 
-use tau_tui_next::style::{Color, Style};
-use tau_tui_next::overlay::{render_select_list, SelectItem, SelectList};
-use tau_tui_next::*;
+use mage_tui::style::{Color, Style};
+use mage_tui::overlay::{render_select_list, SelectItem, SelectList};
+use mage_tui::*;
 
 const RST: &str = "\x1b[0m";
 

@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use tau_tui_next::editor::Editor;
-use tau_tui_next::renderer::Renderer;
-use tau_tui_next::KeyResult;
+use mage_tui::editor::Editor;
+use mage_tui::renderer::Renderer;
+use mage_tui::KeyResult;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent {

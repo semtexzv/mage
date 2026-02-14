@@ -3,9 +3,9 @@
 //!
 //! Press q or Esc to quit.
 
-use tau_tui_next::style::{Color, Style};
-use tau_tui_next::ansi::visible_width;
-use tau_tui_next::*;
+use mage_tui::style::{Color, Style};
+use mage_tui::ansi::visible_width;
+use mage_tui::*;
 use tokio::sync::mpsc;
 
 // ── Theme ───────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ fn make_box(width: u16, bg: Color, pad: Padding, content: &[String]) -> StyledBo
         let vw = visible_width(l);
         let inner_avail = w.saturating_sub(pad.left as usize).saturating_sub(pad.right as usize);
         let text = if vw > inner_avail {
-            tau_tui_next::ansi::truncate_line(l, inner_avail)
+            mage_tui::ansi::truncate_line(l, inner_avail)
         } else {
             l.clone()
         };

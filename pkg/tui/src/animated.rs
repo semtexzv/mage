@@ -1,8 +1,8 @@
 //! Animated text widget — per-character color effects driven by a tick counter.
 //!
 //! ```rust,no_run
-//! use tau_tui_next::animated::{AnimatedText, Effect};
-//! use tau_tui_next::renderer::LineSink;
+//! use mage_tui::animated::{AnimatedText, Effect};
+//! use mage_tui::renderer::LineSink;
 //!
 //! let mut anim = AnimatedText::new("Hello, world!", Effect::rainbow());
 //!

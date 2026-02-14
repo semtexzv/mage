@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
-use tau_tui_next::ansi::{strip_ansi, visible_width};
-use tau_tui_next::layout::{HStack, PaneSize};
-use tau_tui_next::style::Padding;
+use mage_tui::ansi::{strip_ansi, visible_width};
+use mage_tui::layout::{HStack, PaneSize};
+use mage_tui::style::Padding;
 
 #[test]
 fn two_fixed_panes() {

@@ -121,7 +121,7 @@ The mage binary embeds two constants identifying which SDK it was built
 against:
 ```rust
 pub const MAGE_SDK_VERSION: &str = "0.1.0";
-pub const MAGE_SDK_HASH: &str = "a1b2c3d4...";
+pub const MAGE_SDK_HASH: &str = "sha256:a1b2c3d4...";
 ```
 
 The SDK dependency is **implicit** for extensions. Extension authors do not

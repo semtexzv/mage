@@ -3,10 +3,10 @@ use std::process::Command;
 
 use tempfile::tempdir;
 
-use metarust::bundle::{Bundle, Config, RenderContext, Template};
-use metarust::error::Result as MrResult;
-use metarust::module::Dependency;
-use metarust::deps::DepSpec;
+use mage_build::bundle::{Bundle, Config, RenderContext, Template};
+use mage_build::error::Result as MrResult;
+use mage_build::module::Dependency;
+use mage_build::deps::DepSpec;
 
 struct AgentTemplate {
     generation: usize,
@@ -15,7 +15,7 @@ struct AgentTemplate {
 impl Template for AgentTemplate {
     fn render_main(&self, _ctx: &RenderContext) -> MrResult<String> {
         let code = r##"
-use metarust::bundle::{Bundle, Config, Snapshot, Template};
+use mage_build::bundle::{Bundle, Config, Snapshot, Template};
 use std::path::PathBuf;
 
 const HISTORY: &[u8] = include_bytes!("history.json");
@@ -25,7 +25,7 @@ struct NextGenTemplate {
 }
 
 impl Template for NextGenTemplate {
-    fn render_main(&self, _ctx: &metarust::bundle::RenderContext) -> metarust::error::Result<String> {
+    fn render_main(&self, _ctx: &mage_build::bundle::RenderContext) -> mage_build::error::Result<String> {
         let content = include_str!("main.rs");
         Ok(content.replace(
             &format!("let current_generation = {};", self.generation - 1),
@@ -33,20 +33,20 @@ impl Template for NextGenTemplate {
         ))
     }
 
-    fn render_dependencies(&self, _ctx: &metarust::bundle::RenderContext) -> metarust::error::Result<Vec<metarust::module::Dependency>> {
-        let metarust_dir = std::env::var("METARUST_DIR").unwrap();
+    fn render_dependencies(&self, _ctx: &mage_build::bundle::RenderContext) -> mage_build::error::Result<Vec<mage_build::module::Dependency>> {
+        let mage_build_dir = std::env::var("MAGE_BUILD_DIR").unwrap();
         Ok(vec![
-            metarust::module::Dependency::External {
-                name: "metarust".to_string(),
-                spec: metarust::deps::DepSpec::parse(&format!(r#"{{ path = "{}" }}"#, metarust_dir)).unwrap(),
+            mage_build::module::Dependency::External {
+                name: "mage_build".to_string(),
+                spec: mage_build::deps::DepSpec::parse(&format!(r#"{{ path = "{}" }}"#, mage_build_dir)).unwrap(),
             },
-            metarust::module::Dependency::External {
+            mage_build::module::Dependency::External {
                 name: "serde".to_string(),
-                spec: metarust::deps::DepSpec::parse(r#"{ version = "1.0", features = ["derive"] }"#).unwrap(),
+                spec: mage_build::deps::DepSpec::parse(r#"{ version = "1.0", features = ["derive"] }"#).unwrap(),
             },
-            metarust::module::Dependency::External {
+            mage_build::module::Dependency::External {
                 name: "serde_json".to_string(),
-                spec: metarust::deps::DepSpec::Version("1.0".to_string()),
+                spec: mage_build::deps::DepSpec::Version("1.0".to_string()),
             },
         ])
     }
@@ -72,7 +72,7 @@ fn main() {
     }
 
     let approot = PathBuf::from(std::env::var("AGENT_APPROOT").unwrap());
-    let metarust_dir = PathBuf::from(std::env::var("METARUST_DIR").unwrap());
+    let mage_build_dir = PathBuf::from(std::env::var("MAGE_BUILD_DIR").unwrap());
 
     let bundle = Bundle::new(format!("agent-gen-{}", current_generation + 1))
         .with_config(Config { approot, ..Config::default() })
@@ -102,11 +102,11 @@ fn main() {
     }
 
     fn render_dependencies(&self, _ctx: &RenderContext) -> MrResult<Vec<Dependency>> {
-        let metarust_dir = env::current_dir().unwrap();
+        let mage_build_dir = env::current_dir().unwrap();
         Ok(vec![
             Dependency::External {
-                name: "metarust".to_string(),
-                spec: DepSpec::parse(&format!(r#"{{ path = "{}" }}"#, metarust_dir.display())).unwrap(),
+                name: "mage_build".to_string(),
+                spec: DepSpec::parse(&format!(r#"{{ path = "{}" }}"#, mage_build_dir.display())).unwrap(),
             },
             Dependency::External {
                 name: "serde".to_string(),
@@ -124,7 +124,7 @@ fn main() {
 fn test_recursive_agent() {
     let dir = tempdir().unwrap();
     let approot = dir.path().to_path_buf();
-    let metarust_dir = env::current_dir().unwrap();
+    let mage_build_dir = env::current_dir().unwrap();
 
     let config = Config {
         approot: approot.clone(),
@@ -150,7 +150,7 @@ fn test_recursive_agent() {
     // Execute generation 1
     let output = Command::new(&bin_path)
         .env("AGENT_APPROOT", approot.to_str().unwrap())
-        .env("METARUST_DIR", metarust_dir.to_str().unwrap())
+        .env("MAGE_BUILD_DIR", mage_build_dir.to_str().unwrap())
         .output()
         .unwrap();
 

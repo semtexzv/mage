@@ -1,9 +1,9 @@
 use std::fmt::Write as _;
 use std::fs;
 
-use metarust::bundle::{Bundle, Config, RenderContext, Template};
-use metarust::error::Result as MrResult;
-use metarust::module::Module;
+use mage_build::bundle::{Bundle, Config, RenderContext, Template};
+use mage_build::error::Result as MrResult;
+use mage_build::module::Module;
 
 struct SimpleTemplate;
 

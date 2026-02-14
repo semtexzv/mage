@@ -8,9 +8,9 @@
 //! pane-level dirty tracking. q/Esc to quit.
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use tau_tui_next::layout::{HStack, PaneSize};
-use tau_tui_next::style::Padding;
-use tau_tui_next::{run_with_messages, App, Event, RESET};
+use mage_tui::layout::{HStack, PaneSize};
+use mage_tui::style::Padding;
+use mage_tui::{run_with_messages, App, Event, RESET};
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BOLD: &str = "\x1b[1m";
@@ -26,9 +26,9 @@ struct LayoutApp {
     tick: u64,
     events: Vec<(u64, &'static str, &'static str)>, // (tick, color, message)
     hstack: HStack,
-    left: tau_tui_next::layout::PaneId,
-    center: tau_tui_next::layout::PaneId,
-    right: tau_tui_next::layout::PaneId,
+    left: mage_tui::layout::PaneId,
+    center: mage_tui::layout::PaneId,
+    right: mage_tui::layout::PaneId,
 }
 
 enum Msg {
@@ -158,7 +158,7 @@ impl LayoutApp {
 impl App for LayoutApp {
     type Message = Msg;
 
-    fn render(&mut self, r: &mut tau_tui_next::renderer::Renderer) {
+    fn render(&mut self, r: &mut mage_tui::renderer::Renderer) {
         self.hstack.set_width(r.width() as usize);
         self.rebuild_panes();
 

@@ -1,9 +1,9 @@
 use std::rc::Rc;
-use tau_tui_next::ansi::strip_ansi;
-use tau_tui_next::renderer::{Line, Renderer};
-use tau_tui_next::style::Color;
-use tau_tui_next::testutil::TestTerminal;
-use tau_tui_next::Padding;
+use mage_tui::ansi::strip_ansi;
+use mage_tui::renderer::{Line, Renderer};
+use mage_tui::style::Color;
+use mage_tui::testutil::TestTerminal;
+use mage_tui::Padding;
 
 // ── begin_frame + push + end_frame basic flow ───────────────────
 

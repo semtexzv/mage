@@ -1,10 +1,10 @@
 //! Padding showcase — left, right, horizontal on every element type.
 //! Resize-aware TUI. Press q or Esc to quit.
 
-use tau_tui_next::renderer::Renderer;
-use tau_tui_next::style::{Color, Style};
-use tau_tui_next::ansi::visible_width;
-use tau_tui_next::*;
+use mage_tui::renderer::Renderer;
+use mage_tui::style::{Color, Style};
+use mage_tui::ansi::visible_width;
+use mage_tui::*;
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -69,7 +69,7 @@ fn build_sections(outer: u16) -> Vec<String> {
     // Helper: render text_styled and extract lines
     let render_styled = |content: &str, pad: Padding, bg: Option<Color>| -> Vec<String> {
         let mut r = Renderer::new();
-        let mut term = tau_tui_next::testutil::TestTerminal::new(outer, 200);
+        let mut term = mage_tui::testutil::TestTerminal::new(outer, 200);
         r.begin_frame(outer, 200);
         r.push_text_styled(content, &pad, bg);
         r.end_frame(&mut term);
@@ -209,7 +209,7 @@ with five dozen liquor jugs.";
     ] {
         let lines = {
             let mut r = Renderer::new();
-            let mut term = tau_tui_next::testutil::TestTerminal::new(outer, 200);
+            let mut term = mage_tui::testutil::TestTerminal::new(outer, 200);
             r.begin_frame(outer, 200);
             r.push_input(prompt, content, content.len());
             r.end_frame(&mut term);

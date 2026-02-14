@@ -4,8 +4,8 @@
 //! The TUI renders it incrementally with full formatting.
 //! Press q or Esc to quit.
 
-use tau_tui_next::style::Color;
-use tau_tui_next::*;
+use mage_tui::style::Color;
+use mage_tui::*;
 use tokio::sync::mpsc;
 
 const MD_PAD: Padding = Padding::new(1, 2, 1, 2);
@@ -103,7 +103,7 @@ enum Msg {
 impl App for MdApp {
     type Message = Msg;
 
-    fn render(&mut self, r: &mut tau_tui_next::renderer::Renderer) {
+    fn render(&mut self, r: &mut mage_tui::renderer::Renderer) {
         let left = " ".repeat(MD_PAD.left as usize);
 
         r.push_line(format!(

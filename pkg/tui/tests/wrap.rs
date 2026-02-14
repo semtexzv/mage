@@ -1,5 +1,5 @@
-use tau_tui_next::ansi::{split_line_at_col, strip_ansi, visible_width};
-use tau_tui_next::wrap::wrap_text;
+use mage_tui::ansi::{split_line_at_col, strip_ansi, visible_width};
+use mage_tui::wrap::wrap_text;
 
 #[test]
 fn no_wrap_needed() {

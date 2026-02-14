@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::module::{Dependency, Module};
 use crate::toolchain::Toolchain;
 
-/// Configuration for `metarust`
+/// Configuration for `mage-build`
 #[derive(Debug, Clone)]
 pub struct Config {
     pub approot: PathBuf,
@@ -961,12 +961,12 @@ mod tests {
         };
 
         // Create a dummy core crate
-        let core_crate_dir = dir.path().join("agent_core");
+        let core_crate_dir = dir.path().join("mage_core");
         fs::create_dir_all(&core_crate_dir).unwrap();
         let core_cargo_toml = core_crate_dir.join("Cargo.toml");
         fs::write(
             &core_cargo_toml,
-            "\n[package]\nname = \"agent_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            "\n[package]\nname = \"mage_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
 
@@ -998,10 +998,10 @@ mod tests {
         let toml_content = fs::read_to_string(&cargo_toml).unwrap();
 
         // It should automatically inject the core crate into dependencies
-        assert!(toml_content.contains("[dependencies.agent_core]"));
+        assert!(toml_content.contains("[dependencies.mage_core]"));
 
         // And it should automatically include it in the members
         assert!(toml_content.contains("members = ["));
-        assert!(toml_content.contains("agent_core"));
+        assert!(toml_content.contains("mage_core"));
     }
 }

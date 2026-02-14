@@ -1,7 +1,7 @@
 //! Streams a markdown table row-by-row in a TUI. Resize-aware.
 //! Press q or Esc to quit.
 
-use tau_tui_next::*;
+use mage_tui::*;
 use tokio::sync::mpsc;
 
 const HEADER: &str = "| Name    | Score | Status  |\n|---------|-------|---------|\n";

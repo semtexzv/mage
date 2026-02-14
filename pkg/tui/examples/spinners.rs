@@ -5,7 +5,7 @@
 //! Ctrl-C or 'q' to quit.
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use tau_tui_next::{run_with_messages, App, Event};
+use mage_tui::{run_with_messages, App, Event};
 use tokio::sync::mpsc;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -74,7 +74,7 @@ impl Spinner {
         }
     }
 
-    fn render(&self, idx: usize, r: &mut tau_tui_next::renderer::Renderer) {
+    fn render(&self, idx: usize, r: &mut mage_tui::renderer::Renderer) {
         let color = COLORS[idx % COLORS.len()];
         let frame = SPINNER_FRAMES[self.frame];
         let reset = "\x1b[0m";
@@ -108,7 +108,7 @@ enum Msg {
 impl App for SpinnersApp {
     type Message = Msg;
 
-    fn render(&mut self, r: &mut tau_tui_next::renderer::Renderer) {
+    fn render(&mut self, r: &mut mage_tui::renderer::Renderer) {
         r.push_line(
             format!(
                 "\x1b[1m\x1b[36m┌─ spinners demo ─┐\x1b[0m  tick {}",

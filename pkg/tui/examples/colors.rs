@@ -3,9 +3,9 @@
 //!
 //! Rebuilds on resize. Press q or Esc to quit.
 
-use tau_tui_next::style::Color;
-use tau_tui_next::ansi::visible_width;
-use tau_tui_next::*;
+use mage_tui::style::Color;
+use mage_tui::ansi::visible_width;
+use mage_tui::*;
 
 const RST: &str = "\x1b[0m";
 
@@ -32,7 +32,7 @@ fn bg_line(content: &str, w: usize, color: &Color) -> String {
 fn pad_to(s: &str, n: usize) -> String {
     let vw = visible_width(s);
     if vw >= n {
-        tau_tui_next::ansi::truncate_line(s, n)
+        mage_tui::ansi::truncate_line(s, n)
     } else {
         format!("{}{}", s, " ".repeat(n - vw))
     }

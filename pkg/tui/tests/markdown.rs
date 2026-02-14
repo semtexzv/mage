@@ -1,6 +1,6 @@
 use std::rc::Rc;
-use tau_tui_next::ansi::{strip_ansi, visible_width};
-use tau_tui_next::{Markdown, Padding, Renderer};
+use mage_tui::ansi::{strip_ansi, visible_width};
+use mage_tui::{Markdown, Padding, Renderer};
 
 fn lines(md: &str, width: u16) -> Vec<String> {
     let mut m = Markdown::new(width);
@@ -11,7 +11,7 @@ fn lines(md: &str, width: u16) -> Vec<String> {
 fn stripped(md: &str, width: u16) -> Vec<String> {
     lines(md, width)
         .into_iter()
-        .map(|l| tau_tui_next::ansi::strip_ansi(&l))
+        .map(|l| mage_tui::ansi::strip_ansi(&l))
         .collect()
 }
 
@@ -150,8 +150,8 @@ fn incremental_append_rerenders_last_block() {
     assert!(Rc::ptr_eq(&lines1[1], &lines2[1]), "blank should be cached");
 
     // But the paragraph should differ (re-rendered)
-    let para1 = tau_tui_next::ansi::strip_ansi(&lines1[2]);
-    let para2 = tau_tui_next::ansi::strip_ansi(&lines2[2]);
+    let para1 = mage_tui::ansi::strip_ansi(&lines1[2]);
+    let para2 = mage_tui::ansi::strip_ansi(&lines2[2]);
     assert!(!para1.contains("more text"));
     assert!(para2.contains("more text"), "last block re-rendered: {para2}");
 }
@@ -183,7 +183,7 @@ fn set_source_non_append_clears_cache() {
     // Completely different source
     md.set_source("# Different\n\nOther text.".to_string());
     let lines = md.lines();
-    let s = tau_tui_next::ansi::strip_ansi(&lines[0]);
+    let s = mage_tui::ansi::strip_ansi(&lines[0]);
     assert!(s.contains("Different"));
 }
 
@@ -211,13 +211,13 @@ fn fence_only() {
 
 #[test]
 fn partial_code_then_complete() {
-    let mut md = tau_tui_next::Markdown::new(80);
+    let mut md = mage_tui::Markdown::new(80);
     md.append("```rust\nfn foo()");
-    let s1: Vec<String> = md.lines().iter().map(|l| tau_tui_next::ansi::strip_ansi(l)).collect();
+    let s1: Vec<String> = md.lines().iter().map(|l| mage_tui::ansi::strip_ansi(l)).collect();
     assert_eq!(s1.len(), 2); // no closing fence
 
     md.append("\n```");
-    let s2: Vec<String> = md.lines().iter().map(|l| tau_tui_next::ansi::strip_ansi(l)).collect();
+    let s2: Vec<String> = md.lines().iter().map(|l| mage_tui::ansi::strip_ansi(l)).collect();
     assert_eq!(s2[2], "```"); // now has closing fence
 }
 

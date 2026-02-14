@@ -6,10 +6,10 @@
 //!
 //! Esc or Ctrl+C to quit.
 
-use tau_tui_next::style::Color;
-use tau_tui_next::wrap::wrap_text;
-use tau_tui_next::overlay::SelectItem;
-use tau_tui_next::*;
+use mage_tui::style::Color;
+use mage_tui::wrap::wrap_text;
+use mage_tui::overlay::SelectItem;
+use mage_tui::*;
 
 const RST: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";

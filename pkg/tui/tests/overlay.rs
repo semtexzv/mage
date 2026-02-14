@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use tau_tui_next::overlay::{SelectAction, SelectItem, SelectList};
+use mage_tui::overlay::{SelectAction, SelectItem, SelectList};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent {

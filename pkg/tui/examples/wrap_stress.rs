@@ -5,9 +5,9 @@
 //!
 //! Press q or Esc to quit.
 
-use tau_tui_next::style::{Color, Style};
-use tau_tui_next::wrap::wrap_text;
-use tau_tui_next::*;
+use mage_tui::style::{Color, Style};
+use mage_tui::wrap::wrap_text;
+use mage_tui::*;
 
 const RST: &str = "\x1b[0m";
 

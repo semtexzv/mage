@@ -67,9 +67,9 @@ Properties:
 The single source of truth for which binary is active. Append-only JSONL
 (one JSON object per line). The last line is the current generation.
 
-  {"name":"mage-gentle-fox","sdk_version":"0.3.2","sdk_hash":"sha256:a0b1c2...","bundle_hash":"a1b2c3...","parent":null,"timestamp":"2026-02-10T14:30:00Z","generation":0,"toolchain":"rustc 1.85.0","status":"healthy"}
-  {"name":"mage-happy-wolf","sdk_version":"0.3.2","sdk_hash":"sha256:a0b1c2...","bundle_hash":"d4e5f6...","parent":"mage-gentle-fox","timestamp":"2026-02-12T09:15:00Z","generation":1,"toolchain":"rustc 1.85.0","status":"healthy"}
-  {"name":"mage-brave-eagle","sdk_version":"0.3.2","sdk_hash":"sha256:a0b1c2...","bundle_hash":"g7h8i9...","parent":"mage-happy-wolf","timestamp":"2026-02-13T16:42:00Z","generation":2,"toolchain":"rustc 1.85.0","status":"healthy"}
+  {"name":"mage-gentle-fox","sdk_version":"0.3.2","sdk_hash":"sha256:a0b1c2...","bundle_hash":"sha256:a1b2c3...","parent":null,"timestamp":"2026-02-10T14:30:00Z","generation":0,"toolchain":"rustc 1.85.0","status":"healthy"}
+  {"name":"mage-happy-wolf","sdk_version":"0.3.2","sdk_hash":"sha256:a0b1c2...","bundle_hash":"sha256:d4e5f6...","parent":"mage-gentle-fox","timestamp":"2026-02-12T09:15:00Z","generation":1,"toolchain":"rustc 1.85.0","status":"healthy"}
+  {"name":"mage-brave-eagle","sdk_version":"0.3.2","sdk_hash":"sha256:a0b1c2...","bundle_hash":"sha256:g7h8i9...","parent":"mage-happy-wolf","timestamp":"2026-02-13T16:42:00Z","generation":2,"toolchain":"rustc 1.85.0","status":"healthy"}
 
 Properties:
 
@@ -197,8 +197,8 @@ Each binary has a companion .meta file:
   {
     "sdk_version": "0.3.2",
     "sdk_hash": "sha256:a0b1c2d3e4f5...",
-    "bundle_hash": "a1b2c3d4e5f6...",
-    "parent_hash": "previous-hash-or-null",
+    "bundle_hash": "sha256:a1b2c3d4e5f6...",
+    "parent_hash": "sha256:previous-hash-or-null",
     "parent_name": "mage-happy-wolf",
     "timestamp": "2026-02-13T16:42:00Z",
     "generation": 2,
@@ -292,17 +292,17 @@ Each mage binary knows its own identity. At compile time, the generated
 main.rs embeds:
 
   const MAGE_GENERATION_NAME: &str = "mage-brave-eagle";
-  const MAGE_BUNDLE_HASH: &str = "g7h8i9...";
+  const MAGE_BUNDLE_HASH: &str = "sha256:g7h8i9...";
   const MAGE_GENERATION: u32 = 2;
   const MAGE_SDK_VERSION: &str = "0.3.2";
 
 The binary can report this via:
 
   mage --version
-  mage-brave-eagle (gen 2, sdk 0.3.2, hash g7h8i9, rustc 1.85.0)
+  mage-brave-eagle (gen 2, sdk 0.3.2, hash sha256:g7h8i9, rustc 1.85.0)
 
   mage --identity
-  {"name":"mage-brave-eagle","generation":2,"sdk_version":"0.3.2","bundle_hash":"g7h8i9...","parent":"mage-happy-wolf"}
+  {"name":"mage-brave-eagle","generation":2,"sdk_version":"0.3.2","bundle_hash":"sha256:g7h8i9...","parent":"mage-happy-wolf"}
 
 The monitor uses --identity to verify which binary it actually spawned
 (defense against races where generations.jsonl changes between read and spawn).

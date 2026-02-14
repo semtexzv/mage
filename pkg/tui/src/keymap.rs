@@ -1,7 +1,7 @@
 //! Keymap — packed u64 key bindings, const constructors.
 //!
 //! ```ignore
-//! use tau_tui_next::keymap::*;
+//! use mage_tui::keymap::*;
 //!
 //! let km = Keymap::from([
 //!     (ctrl(ch('c')), Act::Quit),

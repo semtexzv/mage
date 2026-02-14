@@ -7,7 +7,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use tau_tui_next::{Text, Color, Style, Padding};
+//! use mage_tui::{Text, Color, Style, Padding};
 //!
 //! let mut t = Text::new("Hello, world!")
 //!     .style(Style::new().bold().fg(Color::Cyan))

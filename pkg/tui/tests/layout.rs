@@ -1,11 +1,11 @@
-use tau_tui_next::renderer::Renderer;
-use tau_tui_next::testutil::TestTerminal;
-use tau_tui_next::ansi::{strip_ansi, truncate_line, visible_width};
-use tau_tui_next::{Markdown, Padding};
+use mage_tui::renderer::Renderer;
+use mage_tui::testutil::TestTerminal;
+use mage_tui::ansi::{strip_ansi, truncate_line, visible_width};
+use mage_tui::{Markdown, Padding};
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-fn render_text(content: &str, padding: &Padding, bg: Option<tau_tui_next::Color>, width: u16) -> Vec<String> {
+fn render_text(content: &str, padding: &Padding, bg: Option<mage_tui::Color>, width: u16) -> Vec<String> {
     let mut r = Renderer::new();
     let mut term = TestTerminal::new(width, 24);
     r.begin_frame(width, 24);

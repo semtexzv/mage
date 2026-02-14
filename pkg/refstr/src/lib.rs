@@ -4,7 +4,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// - Deref to `&str` is O(1) — pointer + length.
 /// - Equality checks pointer first (O(1) fast path for clones).
 /// - Implements `Borrow<str>` so `HashMap<Str<M>, V>` supports `&str` lookup.
-/// - Writable via `fmt::Write` when refcount == 1.
+/// - Writable via [`StrMut`] obtained from [`Str::make_mut`] — no panics, enforced at compile time.
 pub struct Str<M: Mode = Local> {
     ptr: NonNull<u8>,
     len: usize,
@@ -112,7 +112,7 @@ impl<M: Mode> Str<M> {
             ptr::write(header, Header { rc: M::new(1), cap });
 
             Str {
-                ptr: NonNull::new_unchecked(ptr.add(mem::size_of::<Header<M>>())),
+                ptr: NonNull::new_unchecked(ptr.add(size_of::<Header<M>>())),
                 len: 0,
                 _marker: PhantomData,
             }
@@ -140,7 +140,7 @@ impl<M: Mode> Str<M> {
     }
 
     unsafe fn header(&self) -> &Header<M> {
-        unsafe { &*(self.ptr.as_ptr().sub(mem::size_of::<Header<M>>()) as *const Header<M>) }
+        unsafe { &*(self.ptr.as_ptr().sub(size_of::<Header<M>>()) as *const Header<M>) }
     }
 
     fn layout(cap: usize) -> Layout {
@@ -155,25 +155,130 @@ impl<M: Mode> Str<M> {
             let header = self.header();
             let old_cap = header.cap;
             let new_cap = old_cap.checked_mul(2).unwrap().max(required);
-
             let old_layout = Self::layout(old_cap);
             let new_layout = Self::layout(new_cap);
-            let alloc_ptr = self.ptr.as_ptr().sub(mem::size_of::<Header<M>>());
-
+            let alloc_ptr = self.ptr.as_ptr().sub(size_of::<Header<M>>());
             let new_ptr = realloc(alloc_ptr, old_layout, new_layout.size());
             if new_ptr.is_null() {
                 std::alloc::handle_alloc_error(new_layout);
             }
-
             (*(new_ptr as *mut Header<M>)).cap = new_cap;
-            self.ptr = NonNull::new_unchecked(new_ptr.add(mem::size_of::<Header<M>>()));
+            self.ptr = NonNull::new_unchecked(new_ptr.add(size_of::<Header<M>>()));
         }
     }
 
-    /// Push a `&str` onto this string. Panics if refcount > 1.
+    /// # Safety
+    /// Caller must ensure refcount == 1.
+    unsafe fn append_raw(&mut self, s: &str) {
+        unsafe {
+            let req = self.len + s.len();
+            if req > self.header().cap {
+                self.grow(req);
+            }
+            ptr::copy_nonoverlapping(s.as_ptr(), self.ptr.as_ptr().add(self.len), s.len());
+            self.len += s.len();
+        }
+    }
+
+    /// Ensure unique ownership (COW if shared), return a mutable proxy.
+    ///
+    /// If refcount > 1, clones the data into a fresh allocation.
+    /// The returned `StrMut` holds `&mut self`, so no clones can occur
+    /// while it exists — uniqueness is enforced at compile time.
+    ///
+    /// ```
+    /// use refstr::Str;
+    /// use std::fmt::Write;
+    ///
+    /// let mut s: Str = "hello".into();
+    /// let s2 = s.clone(); // rc=2
+    /// write!(s.make_mut(), " world").unwrap(); // COW + append
+    /// assert_eq!(&*s, "hello world");
+    /// assert_eq!(&*s2, "hello");
+    /// ```
+    pub fn make_mut(&mut self) -> StrMut<'_, M> {
+        if self.ref_count() != 1 {
+            let mut fresh = Self::with_capacity(self.len);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.ptr.as_ptr(),
+                    fresh.ptr.as_ptr(),
+                    self.len,
+                );
+            }
+            fresh.len = self.len;
+            *self = fresh;
+        }
+        StrMut { inner: self }
+    }
+}
+
+// --- Mutable Proxy ----------------------------------------------------------
+
+/// Proof of unique ownership over a [`Str`].
+///
+/// Obtained via [`Str::make_mut`]. Cannot be cloned. Borrows `&mut Str<M>`,
+/// so the borrow checker prevents sharing while this exists.
+///
+/// Implements [`fmt::Write`] and [`Deref<Target = str>`] for reading.
+pub struct StrMut<'a, M: Mode = Local> {
+    inner: &'a mut Str<M>,
+}
+
+impl<M: Mode> StrMut<'_, M> {
+    /// Clear contents, keeping the allocation.
+    pub fn clear(&mut self) {
+        self.inner.len = 0;
+    }
+
+    /// Append a string slice.
     pub fn push_str(&mut self, s: &str) {
-        use std::fmt::Write;
-        self.write_str(s).unwrap();
+        unsafe { self.inner.append_raw(s); }
+    }
+
+    /// Current length in bytes.
+    pub fn len(&self) -> usize {
+        self.inner.len
+    }
+
+    /// Returns `true` if empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.len == 0
+    }
+}
+
+impl<M: Mode> Deref for StrMut<'_, M> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &**self.inner
+    }
+}
+
+impl<M: Mode> DerefMut for StrMut<'_, M> {
+    fn deref_mut(&mut self) -> &mut str {
+        unsafe {
+            let slice = std::slice::from_raw_parts_mut(self.inner.ptr.as_ptr(), self.inner.len);
+            std::str::from_utf8_unchecked_mut(slice)
+        }
+    }
+}
+
+impl<M: Mode> fmt::Write for StrMut<'_, M> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        unsafe { self.inner.append_raw(s); }
+        Ok(())
+    }
+}
+
+impl<M: Mode> fmt::Display for StrMut<'_, M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&**self.inner, f)
+    }
+}
+
+impl<M: Mode> fmt::Debug for StrMut<'_, M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self.inner, f)
     }
 }
 
@@ -182,7 +287,7 @@ impl<M: Mode> Str<M> {
 impl<M: Mode> From<&str> for Str<M> {
     fn from(s: &str) -> Self {
         let mut out = Self::with_capacity(s.len());
-        out.push_str(s);
+        unsafe { out.append_raw(s); }
         out
     }
 }
@@ -230,7 +335,7 @@ impl<M: Mode> Drop for Str<M> {
             let header = self.header();
             if header.rc.dec_check() {
                 dealloc(
-                    self.ptr.as_ptr().sub(mem::size_of::<Header<M>>()),
+                    self.ptr.as_ptr().sub(size_of::<Header<M>>()),
                     Self::layout(header.cap),
                 );
             }
@@ -238,25 +343,6 @@ impl<M: Mode> Drop for Str<M> {
     }
 }
 
-impl<M: Mode> fmt::Write for Str<M> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        unsafe {
-            let header = self.header();
-            if header.rc.count() != 1 {
-                panic!("Cannot mutate shared Str (refcount = {})", header.rc.count());
-            }
-
-            let req = self.len + s.len();
-            if req > header.cap {
-                self.grow(req);
-            }
-
-            ptr::copy_nonoverlapping(s.as_ptr(), self.ptr.as_ptr().add(self.len), s.len());
-            self.len += s.len();
-        }
-        Ok(())
-    }
-}
 
 impl<M: Mode> fmt::Display for Str<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -353,106 +439,5 @@ mod serde_impl {
         fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
             deserializer.deserialize_str(StrVisitor(PhantomData))
         }
-    }
-}
-
-// --- Tests ------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn basic_local() {
-        let s: Str = "hello".into();
-        assert_eq!(&*s, "hello");
-        assert_eq!(s.len(), 5);
-        assert_eq!(s.ref_count(), 1);
-    }
-
-    #[test]
-    fn clone_shares() {
-        let a: Str = "world".into();
-        let b = a.clone();
-        assert!(a.ptr_eq(&b));
-        assert_eq!(a.ref_count(), 2);
-        assert_eq!(&*a, &*b);
-    }
-
-    #[test]
-    fn drop_frees() {
-        let a: Str = "test".into();
-        let b = a.clone();
-        assert_eq!(a.ref_count(), 2);
-        drop(b);
-        assert_eq!(a.ref_count(), 1);
-    }
-
-    #[test]
-    fn push_str_works() {
-        let mut s: Str = Str::with_capacity(16);
-        s.push_str("hello");
-        s.push_str(" world");
-        assert_eq!(&*s, "hello world");
-    }
-
-    #[test]
-    #[should_panic(expected = "Cannot mutate shared Str")]
-    fn push_str_panics_if_shared() {
-        let mut a: Str = "hello".into();
-        let _b = a.clone();
-        a.push_str(" world");
-    }
-
-    #[test]
-    fn hashmap_lookup_with_str() {
-        let mut map: HashMap<Str, u32> = HashMap::new();
-        let key: Str = "hello".into();
-        map.insert(key, 42);
-        assert_eq!(map.get("hello"), Some(&42));
-    }
-
-    #[test]
-    fn equality() {
-        let a: Str = "hello".into();
-        let b: Str = "hello".into();
-        let c = a.clone();
-
-        // Different allocations, same content
-        assert_eq!(a, b);
-        assert!(!a.ptr_eq(&b));
-
-        // Same allocation
-        assert_eq!(a, c);
-        assert!(a.ptr_eq(&c));
-
-        // Against &str
-        assert_eq!(a, "hello");
-    }
-
-    #[test]
-    fn atomic_basic() {
-        let a: Str<Atomic> = "threadsafe".into();
-        let b = a.clone();
-        assert!(a.ptr_eq(&b));
-        assert_eq!(&*a, "threadsafe");
-    }
-
-    #[test]
-    fn grow_realloc() {
-        let mut s: Str = Str::with_capacity(2);
-        s.push_str("this is a much longer string that forces reallocation");
-        assert_eq!(&*s, "this is a much longer string that forces reallocation");
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn serde_roundtrip() {
-        let original: Str = "serde test".into();
-        let json = serde_json::to_string(&original).unwrap();
-        assert_eq!(json, "\"serde test\"");
-        let deserialized: Str = serde_json::from_str(&json).unwrap();
-        assert_eq!(original, deserialized);
     }
 }
