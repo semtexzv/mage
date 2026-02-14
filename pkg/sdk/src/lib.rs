@@ -80,12 +80,12 @@ pub mod prelude {
     };
 
     // Agent types
-    pub use crate::types::{AgentMessage, AgentEvent, DeliverAs};
+    pub use crate::types::{Message, MessageBody, EntryId, AgentEvent, DeliverAs};
 
     // LLM types (the subset extensions actually touch)
     pub use crate::llm::CancelToken;
     pub use crate::llm::types::{
-        Message, UserContent, ContentBlock, Model, Usage,
+        UserContent, ContentBlock, Model, Usage,
     };
 
     // Strings

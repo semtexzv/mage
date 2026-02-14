@@ -20,12 +20,12 @@
 use std::rc::Rc;
 
 use refstr::Str;
-use llm::{Message, Model, Provider, StreamOptions};
+use llm::{Model, Provider, StreamOptions};
 
 use crate::agent_loop::{LoopConfig, StreamFn};
 use crate::extension::{Extension, ExtensionFactory};
 use crate::session::AgentSession;
-use crate::types::{AgentMessage, AgentState};
+use crate::types::{Message, AgentState};
 
 // ---------------------------------------------------------------------------
 // AgentInit — clonable recipe for spawning sessions
@@ -56,7 +56,7 @@ pub struct AgentInit {
     /// Custom stream function override. If set, bypasses provider resolution.
     stream_fn_override: Option<Rc<StreamFnShared>>,
     /// Message conversion function.
-    convert_to_llm: Rc<dyn Fn(&[AgentMessage]) -> Vec<Message>>,
+    convert_to_llm: Rc<dyn Fn(&[Message]) -> Vec<llm::Message>>,
 }
 
 /// Shared stream function type (Rc-wrapped for clonability).
@@ -74,7 +74,7 @@ impl AgentInit {
         let stream_fn = self.build_stream_fn();
 
         let convert_rc = self.convert_to_llm.clone();
-        let convert_to_llm: Box<dyn Fn(&[AgentMessage]) -> Vec<Message>> =
+        let convert_to_llm: Box<dyn Fn(&[Message]) -> Vec<llm::Message>> =
             Box::new(move |msgs| convert_rc(msgs));
 
         let state = AgentState {
@@ -145,7 +145,7 @@ pub struct AgentBuilder {
     ext_factories: Vec<ExtensionFactory>,
     options: StreamOptions,
     max_turns: u32,
-    convert_to_llm: Option<Rc<dyn Fn(&[AgentMessage]) -> Vec<Message>>>,
+    convert_to_llm: Option<Rc<dyn Fn(&[Message]) -> Vec<llm::Message>>>,
 }
 
 impl AgentBuilder {
@@ -216,7 +216,7 @@ impl AgentBuilder {
 
     pub fn convert_to_llm(
         mut self,
-        f: impl Fn(&[AgentMessage]) -> Vec<Message> + 'static,
+        f: impl Fn(&[Message]) -> Vec<llm::Message> + 'static,
     ) -> Self {
         self.convert_to_llm = Some(Rc::new(f));
         self
@@ -279,12 +279,10 @@ impl Extension for NoopExtension {}
 // ---------------------------------------------------------------------------
 
 /// Default conversion: extract LLM messages, drop custom messages.
-fn default_convert_to_llm(messages: &[AgentMessage]) -> Vec<Message> {
+fn default_convert_to_llm(messages: &[Message]) -> Vec<llm::Message> {
     messages
         .iter()
-        .filter_map(|m| match m {
-            AgentMessage::Llm(msg) => Some(msg.clone()),
-            AgentMessage::Custom { .. } => None,
-        })
+        .filter(|m| !m.ephemeral)
+        .map(|m| m.to_llm())
         .collect()
 }

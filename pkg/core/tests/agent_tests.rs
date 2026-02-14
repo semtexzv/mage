@@ -6,7 +6,7 @@ use std::rc::Rc;
 use serde_json::json;
 
 use llm::{
-    AssistantMessageEvent, CancelToken, Message,
+    AssistantMessageEvent, CancelToken,
     Model, ModelCost, StopReason, StreamOptions,
 };
 use mage_core::agent::AgentBuilder;
@@ -60,21 +60,15 @@ fn text_stream(text: &str) -> StreamFn {
     })
 }
 
-fn default_convert(messages: &[AgentMessage]) -> Vec<Message> {
-    messages
-        .iter()
-        .filter_map(|m| match m {
-            AgentMessage::Llm(msg) => Some(msg.clone()),
-            AgentMessage::Custom { .. } => None,
-        })
-        .collect()
+fn default_convert(messages: &[Message]) -> Vec<llm::Message> {
+    messages.iter().map(|m| m.to_llm()).collect()
 }
 
 /// Create a test session with given stream_fn, extensions, and initial messages.
 fn test_session(
     stream_fn: StreamFn,
     exts: Vec<Box<dyn Extension>>,
-    messages: Vec<AgentMessage>,
+    messages: Vec<Message>,
 ) -> AgentSession {
     let state = AgentState::new(
         "test",
@@ -102,7 +96,7 @@ async fn test_basic_text_response() {
         let mut session = test_session(
             text_stream("Hello! How can I help?"),
             vec![],
-            vec![AgentMessage::user_text("Hello")],
+            vec![Message::user_text("Hello")],
         );
         session.state.system_prompt = "You are helpful.".into();
 
@@ -133,7 +127,7 @@ async fn test_cancellation() {
         let mut session = test_session(
             text_stream("won't get here"),
             vec![],
-            vec![AgentMessage::user_text("go")],
+            vec![Message::user_text("go")],
         );
         session.cancel.cancel();
 
@@ -206,7 +200,7 @@ async fn test_observe_hooks_fire() {
         let mut session = test_session(
             text_stream("hello"),
             vec![Box::new(CountingHook(counter.clone()))],
-            vec![AgentMessage::user_text("hi")],
+            vec![Message::user_text("hi")],
         );
 
         let (tx, _rx) = event_stream::new_agent_stream();
@@ -252,7 +246,7 @@ async fn test_hook_ordering() {
                 Box::new(OrderTracker { id: 2, log: log.clone() }),
                 Box::new(OrderTracker { id: 3, log: log.clone() }),
             ],
-            vec![AgentMessage::user_text("hi")],
+            vec![Message::user_text("hi")],
         );
 
         let (tx, _rx) = event_stream::new_agent_stream();
@@ -388,12 +382,12 @@ struct ContextInjector;
 impl Extension for ContextInjector {
     fn on_context<'a>(
         &'a mut self,
-        messages: &'a [AgentMessage],
+        messages: &'a [Message],
         _session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<ContextAmend>> {
         Box::pin(async move {
             let mut new_messages = messages.to_vec();
-            new_messages.push(AgentMessage::user_text("[injected by hook]"));
+            new_messages.push(Message::user_text("[injected by hook]"));
             Disposition::Value(ContextAmend { messages: new_messages })
         })
     }
@@ -403,7 +397,7 @@ impl Extension for ContextInjector {
 async fn test_context_amendment() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let received = Rc::new(std::cell::RefCell::new(Vec::<Vec<Message>>::new()));
+        let received = Rc::new(std::cell::RefCell::new(Vec::<Vec<llm::Message>>::new()));
         let rm = received.clone();
 
         let stream_fn: StreamFn = Box::new(move |req: llm::StreamRequest| {
@@ -428,7 +422,7 @@ async fn test_context_amendment() {
         let mut session = test_session(
             stream_fn,
             vec![Box::new(ContextInjector)],
-            vec![AgentMessage::user_text("original")],
+            vec![Message::user_text("original")],
         );
 
         let (tx, _rx) = event_stream::new_agent_stream();
@@ -575,8 +569,8 @@ async fn test_session_handle_inject() {
     );
 
     let handle = session.handle();
-    handle.inject(AgentMessage::user_text("injected"), DeliverAs::FollowUp);
-    handle.inject(AgentMessage::user_text("steering"), DeliverAs::Steer);
+    handle.inject(Message::user_text("injected"), DeliverAs::FollowUp);
+    handle.inject(Message::user_text("steering"), DeliverAs::Steer);
 
     let queue = session.inject.borrow();
     assert_eq!(queue.len(), 2);
@@ -659,7 +653,7 @@ async fn test_extension_registers_tool_via_init() {
         let mut session = test_session(
             text_stream("ok"),
             vec![Box::new(ToolRegisteringExt)],
-            vec![AgentMessage::user_text("hi")],
+            vec![Message::user_text("hi")],
         );
 
         let (tx, _rx) = event_stream::new_agent_stream();
@@ -771,7 +765,7 @@ async fn test_tool_execution_through_loop() {
         let mut session = test_session(
             tool_use_then_text_stream(),
             vec![Box::new(EchoToolExt)],
-            vec![AgentMessage::user_text("ping")],
+            vec![Message::user_text("ping")],
         );
 
         let (tx, mut rx) = event_stream::new_agent_stream();
@@ -795,19 +789,19 @@ async fn test_tool_execution_through_loop() {
         // Conversation should have: user + assistant(tool_call) + tool_result + assistant(text)
         assert_eq!(session.state.messages.len(), 4,
             "expected 4 messages (user, assistant+tool_call, tool_result, assistant+text), got {}\n{:?}",
-            session.state.messages.len(), session.state.messages.iter().map(|m| m.role()).collect::<Vec<_>>());
+            session.state.messages.len(), session.state.messages.iter().map(|m| m.role_name()).collect::<Vec<_>>());
 
         // Verify the tool result message content
-        match &session.state.messages[2] {
-            AgentMessage::Llm(Message::ToolResult(tr)) => {
-                assert_eq!(&*tr.tool_name, "echo");
-                assert!(!tr.is_error);
-                match &tr.content[0] {
+        match &session.state.messages[2].body {
+            MessageBody::ToolResult { tool_name, is_error, content, .. } => {
+                assert_eq!(&**tool_name, "echo");
+                assert!(!is_error);
+                match &content[0] {
                     llm::UserContent::Text { text } => assert_eq!(text, "pong: ping"),
                     _ => panic!("expected text content in tool result"),
                 }
             }
-            other => panic!("expected tool result at index 2, got {:?}", other.role()),
+            other => panic!("expected tool result at index 2, got {:?}", session.state.messages[2].role_name()),
         }
     }).await;
 }
@@ -906,7 +900,7 @@ async fn test_tool_blocked_through_loop() {
                     block_count: 0,
                 }),
             ],
-            vec![AgentMessage::user_text("do dangerous thing")],
+            vec![Message::user_text("do dangerous thing")],
         );
 
         let (tx, _rx) = event_stream::new_agent_stream();
@@ -914,12 +908,12 @@ async fn test_tool_blocked_through_loop() {
         assert!(result.is_ok(), "loop should succeed even with blocked tool: {:?}", result);
 
         // Tool result should be an error from the block
-        let tool_results: Vec<_> = session.state.messages.iter().filter_map(|m| match m {
-            AgentMessage::Llm(Message::ToolResult(tr)) => Some(tr),
+        let tool_results: Vec<_> = session.state.messages.iter().filter_map(|m| match &m.body {
+            MessageBody::ToolResult { is_error, .. } => Some(is_error),
             _ => None,
         }).collect();
         assert_eq!(tool_results.len(), 1, "should have one tool result");
-        assert!(tool_results[0].is_error, "blocked tool result should be marked as error");
+        assert!(tool_results[0], "blocked tool result should be marked as error");
     }).await;
 }
 

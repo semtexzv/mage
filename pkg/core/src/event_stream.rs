@@ -2,10 +2,10 @@
 
 use llm::event_stream;
 
-use crate::types::{AgentEvent, AgentMessage};
+use crate::types::{AgentEvent, Message};
 
-pub type AgentEventSender = event_stream::EventStreamSender<AgentEvent, Vec<AgentMessage>>;
-pub type AgentEventReceiver = event_stream::EventStreamReceiver<AgentEvent, Vec<AgentMessage>>;
+pub type AgentEventSender = event_stream::EventStreamSender<AgentEvent, Vec<Message>>;
+pub type AgentEventReceiver = event_stream::EventStreamReceiver<AgentEvent, Vec<Message>>;
 
 /// Create a new agent event stream pair.
 pub fn new_agent_stream() -> (AgentEventSender, AgentEventReceiver) {

@@ -7,8 +7,7 @@
 use std::time::Duration;
 
 use llm::{
-    AssistantMessage, ContentBlock,
-    Message, StopReason,
+    AssistantMessage, ContentBlock, StopReason,
 };
 
 use crate::event_stream::AgentEventSender;
@@ -18,7 +17,7 @@ use crate::extension::{
     ToolResultArgs, TurnEndArgs, AgentEndArgs, ContextAmend, Registry,
 };
 use crate::session::AgentSession;
-use crate::types::{AgentEvent, AgentMessage};
+use crate::types::{AgentEvent, Message};
 use crate::tool::{ToolResult, ToolContent};
 
 const MAX_LLM_RETRIES: u32 = 3;
@@ -64,7 +63,7 @@ pub struct LoopConfig {
     pub max_turns: u32,
     pub stream_fn: StreamFn,
     pub options: llm::StreamOptions,
-    pub convert_to_llm: Box<dyn Fn(&[AgentMessage]) -> Vec<Message>>,
+    pub convert_to_llm: Box<dyn Fn(&[Message]) -> Vec<llm::Message>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -95,8 +94,8 @@ pub async fn run(
     }
 
     // Queues for steering and follow-up messages.
-    let mut steering_queue: Vec<AgentMessage> = Vec::new();
-    let mut follow_up_queue: Vec<AgentMessage> = Vec::new();
+    let mut steering_queue: Vec<Message> = Vec::new();
+    let mut follow_up_queue: Vec<Message> = Vec::new();
 
     // --- agent_start ---
     events.push(AgentEvent::AgentStart);
@@ -151,7 +150,7 @@ pub async fn run(
         .await?;
 
         // Add assistant message to conversation
-        let final_agent_msg = AgentMessage::Llm(Message::Assistant(assistant_msg.clone()));
+        let final_agent_msg = Message::from_assistant(assistant_msg.clone());
         session.state.messages.push(final_agent_msg.clone());
 
         // --- tool execution ---
@@ -197,7 +196,7 @@ pub async fn run(
 
         // Add tool results to conversation
         for trm in &tool_result_messages {
-            session.state.messages.push(AgentMessage::Llm(Message::ToolResult(trm.clone())));
+            session.state.messages.push(Message::from_tool_result(trm.clone()));
         }
 
         // If stop reason wasn't ToolUse, check follow-ups or finish
@@ -238,7 +237,7 @@ pub async fn run(
 async fn stream_llm(
     session: &mut AgentSession,
     events: &AgentEventSender,
-    llm_messages: Vec<Message>,
+    llm_messages: Vec<llm::Message>,
 ) -> Result<AssistantMessage, LoopError> {
     let llm_context = llm::Context {
         system_prompt: Some(session.state.system_prompt.as_str().into()),
@@ -282,7 +281,7 @@ async fn stream_llm(
         );
     // message_start
         {
-            let msg = AgentMessage::Llm(Message::Assistant(assistant_msg.clone()));
+            let msg = Message::from_assistant(assistant_msg.clone());
             events.push(AgentEvent::MessageStart { message: msg.clone() });
             let args = MessageArgs { message: &msg };
             let mut exts = std::mem::take(&mut session.exts);
@@ -294,7 +293,7 @@ async fn stream_llm(
     // Read events
         while let Some(event) = rx.recv().await {
             llm::event::apply_event(&mut assistant_msg, &event);
-            let msg = AgentMessage::Llm(Message::Assistant(assistant_msg.clone()));
+            let msg = Message::from_assistant(assistant_msg.clone());
             events.push(AgentEvent::MessageUpdate {
                 message: msg,
                 assistant_message_event: event.clone(),
@@ -321,7 +320,7 @@ async fn stream_llm(
             Ok(()) => {
                 // message_end
                 {
-                    let msg = AgentMessage::Llm(Message::Assistant(assistant_msg.clone()));
+                    let msg = Message::from_assistant(assistant_msg.clone());
                     events.push(AgentEvent::MessageEnd { message: msg.clone() });
                     let args = MessageArgs { message: &msg };
                     let mut exts = std::mem::take(&mut session.exts);
@@ -339,7 +338,7 @@ async fn stream_llm(
                 if !is_retryable(&e) || attempt == MAX_LLM_RETRIES {
                     // message_end (even on error)
                     {
-                        let msg = AgentMessage::Llm(Message::Assistant(assistant_msg.clone()));
+                        let msg = Message::from_assistant(assistant_msg.clone());
                         events.push(AgentEvent::MessageEnd { message: msg.clone() });
                         let args = MessageArgs { message: &msg };
                         let mut exts = std::mem::take(&mut session.exts);
@@ -368,8 +367,8 @@ async fn stream_llm(
 async fn execute_tools(
     session: &mut AgentSession,
     events: &AgentEventSender,
-    steering_queue: &mut Vec<AgentMessage>,
-    follow_up_queue: &mut Vec<AgentMessage>,
+    steering_queue: &mut Vec<Message>,
+    follow_up_queue: &mut Vec<Message>,
     tool_calls: &[(refstr::Str, refstr::Str, serde_json::Value)],
 ) -> Vec<llm::ToolResultMessage> {
     let mut tool_result_messages = Vec::new();

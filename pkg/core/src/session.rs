@@ -20,7 +20,7 @@ use llm::{CancelToken, Model};
 use crate::agent_loop::{self, LoopConfig, LoopError};
 use crate::event_stream::{self, AgentEventReceiver};
 use crate::extension::Extension;
-use crate::types::{AgentMessage, AgentState, DeliverAs};
+use crate::types::{Message, AgentState, DeliverAs};
 
 // ---------------------------------------------------------------------------
 // InjectQueue — async message injection
@@ -29,7 +29,7 @@ use crate::types::{AgentMessage, AgentState, DeliverAs};
 /// Queue for injecting messages into the agent loop from outside.
 ///
 /// Shared via `Rc<RefCell<>>` between the session and its handles.
-pub type InjectQueue = Rc<RefCell<VecDeque<(AgentMessage, DeliverAs)>>>;
+pub type InjectQueue = Rc<RefCell<VecDeque<(Message, DeliverAs)>>>;
 
 // ---------------------------------------------------------------------------
 // Notify — minimal single-threaded notification primitive
@@ -106,7 +106,7 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     /// Queue a message for delivery to the agent loop.
-    pub fn inject(&self, msg: AgentMessage, deliver: DeliverAs) {
+    pub fn inject(&self, msg: Message, deliver: DeliverAs) {
         self.inject.borrow_mut().push_back((msg, deliver));
         // If the loop is waiting for injection, wake it.
         self.idle_notify.notify();
@@ -199,7 +199,7 @@ impl AgentSession {
     /// Run the agent with the given user prompt.
     /// Returns the event receiver — the caller reads events from it.
     pub async fn prompt(&mut self, text: &str) -> Result<AgentEventReceiver, LoopError> {
-        self.state.messages.push(AgentMessage::user_text(text));
+        self.state.messages.push(Message::user_text(text));
         self.cancel = CancelToken::new();
 
         let (tx, rx) = event_stream::new_agent_stream();
@@ -214,11 +214,11 @@ impl AgentSession {
 
     /// Inject a steering message (interrupts current tool execution).
     pub fn steer(&mut self, text: &str) {
-        self.state.messages.push(AgentMessage::user_text(text));
+        self.state.messages.push(Message::user_text(text));
     }
 
     /// Access the conversation history.
-    pub fn messages(&self) -> &[AgentMessage] {
+    pub fn messages(&self) -> &[Message] {
         &self.state.messages
     }
 
@@ -234,8 +234,8 @@ impl AgentSession {
     /// Drain the inject queue into the outbox vectors.
     pub(crate) fn drain_inject(
         &self,
-        steering: &mut Vec<AgentMessage>,
-        follow_up: &mut Vec<AgentMessage>,
+        steering: &mut Vec<Message>,
+        follow_up: &mut Vec<Message>,
     ) {
         let mut queue = self.inject.borrow_mut();
         for (msg, deliver) in queue.drain(..) {

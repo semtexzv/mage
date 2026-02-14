@@ -37,7 +37,7 @@ use llm::{AssistantMessageEvent, ToolResultMessage, UserContent, Model};
 
 use crate::session::AgentSession;
 use crate::tool::{ErasedTool, Tool, ToolResult, erase_tool};
-use crate::types::AgentMessage;
+use crate::types::Message;
 
 // ---------------------------------------------------------------------------
 // Disposition — what a decision hook returns
@@ -71,7 +71,7 @@ impl<T> Default for Disposition<T> {
 
 pub struct BeforeStartAmend {
     pub system_prompt: Option<String>,
-    pub inject_message: Option<AgentMessage>,
+    pub inject_message: Option<Message>,
 }
 
 pub struct ToolResultAmend {
@@ -86,7 +86,7 @@ pub struct InputAmend {
 }
 
 pub struct ContextAmend {
-    pub messages: Vec<AgentMessage>,
+    pub messages: Vec<Message>,
 }
 
 pub struct CompactAmend {
@@ -122,12 +122,12 @@ pub struct BeforeStartArgs<'a> {
 }
 
 pub struct TurnEndArgs<'a> {
-    pub message: &'a AgentMessage,
+    pub message: &'a Message,
     pub tool_results: &'a [ToolResultMessage],
 }
 
 pub struct MessageArgs<'a> {
-    pub message: &'a AgentMessage,
+    pub message: &'a Message,
 }
 
 pub struct MessageDeltaArgs<'a> {
@@ -154,7 +154,7 @@ pub struct UserBashArgs<'a> {
 }
 
 pub struct AgentEndArgs<'a> {
-    pub messages: &'a [AgentMessage],
+    pub messages: &'a [Message],
 }
 
 pub struct ModelSelectArgs<'a> {
@@ -266,7 +266,7 @@ pub trait Extension {
 
     fn on_context<'a>(
         &'a mut self,
-        messages: &'a [AgentMessage],
+        messages: &'a [Message],
         session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<ContextAmend>> {
         Box::pin(async { Disposition::Propagate })
