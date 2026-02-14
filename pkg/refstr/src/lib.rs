@@ -3,7 +3,6 @@ use std::cell::Cell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicUsize, Ordering};

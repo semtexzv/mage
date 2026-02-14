@@ -139,6 +139,22 @@ pub struct AgentState {
 }
 
 impl AgentState {
+    /// Create a new `AgentState` with no tools.
+    pub fn new(
+        system_prompt: impl Into<String>,
+        model: llm::Model,
+        messages: Vec<AgentMessage>,
+        options: llm::StreamOptions,
+    ) -> Self {
+        Self {
+            system_prompt: system_prompt.into(),
+            model,
+            messages,
+            tools: Vec::new(),
+            options,
+        }
+    }
+
     /// Convert tools to LLM tool schemas.
     pub fn llm_tools(&self) -> Vec<llm::Tool> {
         self.tools.iter().map(|t| t.to_llm_tool()).collect()

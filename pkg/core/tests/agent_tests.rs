@@ -1,7 +1,6 @@
 //! Integration tests for agent loop, hooks, and tool execution.
 
 use std::cell::Cell;
-use std::pin::Pin;
 use std::rc::Rc;
 
 use serde_json::json;
@@ -14,7 +13,7 @@ use mage_core::agent::AgentBuilder;
 use mage_core::agent_loop::{self, LoopConfig, StreamFn};
 use mage_core::event_stream;
 use mage_core::extension::*;
-use mage_core::tool::{ToolDef, ToolResult};
+use mage_core::tool::{Tool, ToolExecution, ToolResult};
 use mage_core::types::*;
 
 // ---------------------------------------------------------------------------
@@ -40,19 +39,23 @@ fn test_model() -> Model {
 /// StreamFn that sends a fixed text response.
 fn text_stream(text: &str) -> StreamFn {
     let text = text.to_owned();
-    Box::new(move |_ctx, _opts, _cancel, tx| {
+    Box::new(move |_req: llm::StreamRequest| {
         let text = text.clone();
-        Box::pin(async move {
-            tx.send(AssistantMessageEvent::Start).ok();
-            tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
-            tx.send(AssistantMessageEvent::TextDelta {
-                content_index: 0,
-                delta: text.as_str().into(),
-            }).ok();
-            tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
-            tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
-            Ok(())
-        })
+        let (tx, rx) = llm::channel::channel();
+        llm::StreamHandle {
+            events: rx,
+            task: Box::pin(async move {
+                tx.send(AssistantMessageEvent::Start).ok();
+                tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
+                tx.send(AssistantMessageEvent::TextDelta {
+                    content_index: 0,
+                    delta: text.as_str().into(),
+                }).ok();
+                tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
+                tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
+                Ok(())
+            }),
+        }
     })
 }
 
@@ -74,13 +77,12 @@ fn default_convert(messages: &[AgentMessage]) -> Vec<Message> {
 async fn test_basic_text_response() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let mut state = AgentState {
-            system_prompt: "You are helpful.".into(),
-            model: test_model(),
-            messages: vec![AgentMessage::user_text("Hello")],
-            tools: vec![],
-            options: StreamOptions::default(),
-        };
+        let mut state = AgentState::new(
+            "You are helpful.",
+            test_model(),
+            vec![AgentMessage::user_text("Hello")],
+            StreamOptions::default(),
+        );
         let mut hooks: Vec<Box<dyn Extension>> = vec![];
         let config = LoopConfig {
             max_turns: 10,
@@ -114,13 +116,12 @@ async fn test_basic_text_response() {
 async fn test_cancellation() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let mut state = AgentState {
-            system_prompt: "test".into(),
-            model: test_model(),
-            messages: vec![AgentMessage::user_text("go")],
-            tools: vec![],
-            options: StreamOptions::default(),
-        };
+        let mut state = AgentState::new(
+            "test",
+            test_model(),
+            vec![AgentMessage::user_text("go")],
+            StreamOptions::default(),
+        );
         let mut hooks: Vec<Box<dyn Extension>> = vec![];
         let config = LoopConfig {
             max_turns: 0,
@@ -197,13 +198,12 @@ async fn test_observe_hooks_fire() {
     local.run_until(async {
         let counter = Rc::new(SharedCounter::new());
 
-        let mut state = AgentState {
-            system_prompt: "test".into(),
-            model: test_model(),
-            messages: vec![AgentMessage::user_text("hi")],
-            tools: vec![],
-            options: StreamOptions::default(),
-        };
+        let mut state = AgentState::new(
+            "test",
+            test_model(),
+            vec![AgentMessage::user_text("hi")],
+            StreamOptions::default(),
+        );
         let mut hooks: Vec<Box<dyn Extension>> = vec![
             Box::new(CountingHook(counter.clone())),
         ];
@@ -251,13 +251,12 @@ async fn test_hook_ordering() {
     local.run_until(async {
         let log = Rc::new(std::cell::RefCell::new(Vec::new()));
 
-        let mut state = AgentState {
-            system_prompt: "test".into(),
-            model: test_model(),
-            messages: vec![AgentMessage::user_text("hi")],
-            tools: vec![],
-            options: StreamOptions::default(),
-        };
+        let mut state = AgentState::new(
+            "test",
+            test_model(),
+            vec![AgentMessage::user_text("hi")],
+            StreamOptions::default(),
+        );
         let mut hooks: Vec<Box<dyn Extension>> = vec![
             Box::new(OrderTracker { id: 1, log: log.clone() }),
             Box::new(OrderTracker { id: 2, log: log.clone() }),
@@ -346,29 +345,52 @@ async fn test_tool_call_blocking() {
 // Tool execution (unit, no loop)
 // ===================================================================
 
+struct EchoTool;
+
+impl Tool for EchoTool {
+    type State = String;
+
+    fn name(&self) -> &str { "echo" }
+    fn description(&self) -> &str { "Echoes input" }
+    fn parameters(&self) -> &serde_json::Value {
+        // Return a static ref via lazy; or just leak. For tests, a const works.
+        // Use a thread_local or Box::leak for the static ref.
+        static PARAMS: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
+            json!({"type": "object", "properties": {"text": {"type": "string"}}})
+        });
+        &PARAMS
+    }
+
+    fn execute(
+        &self,
+        _tool_call_id: &str,
+        params: serde_json::Value,
+        _cancel: CancelToken,
+    ) -> ToolExecution<Self::State> {
+        let text = params.get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("no input")
+            .to_owned();
+        ToolExecution::running(async move {
+            ToolResult::success(text)
+        })
+    }
+}
+
 #[tokio::test]
 async fn test_tool_execution() {
-    let tool = ToolDef {
-        name: "echo".into(),
-        label: "Echo".into(),
-        description: "Echoes input".into(),
-        parameters: json!({"type": "object", "properties": {"text": {"type": "string"}}}),
-        execute: Box::new(|_id, params, _cancel| {
-            Box::pin(async move {
-                let text = params.get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("no input");
-                ToolResult {
-                    content: vec![llm::UserContent::Text { text: text.to_owned() }],
-                    details: serde_json::Value::Null,
-                }
-            })
-        }),
-    };
+    let tool = EchoTool;
 
-    let result = (tool.execute)("call_1", json!({"text": "hello"}), CancelToken::new()).await;
-    assert_eq!(result.content.len(), 1);
-    match &result.content[0] {
+    let execution = tool.execute("call_1", json!({"text": "hello"}), CancelToken::new());
+    let result = match execution {
+        ToolExecution::Running(fut) => fut.await,
+        ToolExecution::Ready(r) => r,
+        ToolExecution::Custom { task, .. } => task.await,
+    };
+    assert!(!result.is_error());
+    let content = result.content();
+    assert_eq!(content.content.len(), 1);
+    match &content.content[0] {
         llm::UserContent::Text { text } => assert_eq!(text, "hello"),
         _ => panic!("expected text"),
     }
@@ -401,28 +423,31 @@ async fn test_context_amendment() {
         let received = Rc::new(std::cell::RefCell::new(Vec::<Vec<Message>>::new()));
         let rm = received.clone();
 
-        let stream_fn: StreamFn = Box::new(move |ctx, _opts, _cancel, tx| {
-            rm.borrow_mut().push(ctx.messages.clone());
-            Box::pin(async move {
-                tx.send(AssistantMessageEvent::Start).ok();
-                tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
-                tx.send(AssistantMessageEvent::TextDelta {
-                    content_index: 0,
-                    delta: "ok".into(),
-                }).ok();
-                tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
-                tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
-                Ok(())
-            })
+        let stream_fn: StreamFn = Box::new(move |req: llm::StreamRequest| {
+            rm.borrow_mut().push(req.context.messages.clone());
+            let (tx, rx) = llm::channel::channel();
+            llm::StreamHandle {
+                events: rx,
+                task: Box::pin(async move {
+                    tx.send(AssistantMessageEvent::Start).ok();
+                    tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
+                    tx.send(AssistantMessageEvent::TextDelta {
+                        content_index: 0,
+                        delta: "ok".into(),
+                    }).ok();
+                    tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
+                    tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
+                    Ok(())
+                }),
+            }
         });
 
-        let mut state = AgentState {
-            system_prompt: "test".into(),
-            model: test_model(),
-            messages: vec![AgentMessage::user_text("original")],
-            tools: vec![],
-            options: StreamOptions::default(),
-        };
+        let mut state = AgentState::new(
+            "test",
+            test_model(),
+            vec![AgentMessage::user_text("original")],
+            StreamOptions::default(),
+        );
         let mut hooks: Vec<Box<dyn Extension>> = vec![
             Box::new(ContextInjector),
         ];
@@ -461,7 +486,6 @@ impl Extension for ResultAmender {
                 content: Some(vec![llm::UserContent::Text {
                     text: "[amended result]".into(),
                 }]),
-                details: None,
                 is_error: Some(false),
             })
         })
@@ -476,10 +500,7 @@ async fn test_tool_result_amendment() {
     let mut outbox = vec![];
     let ctx = HookCtx::new(&model, "test", &mut outbox, &cancel);
 
-    let original = ToolResult {
-        content: vec![llm::UserContent::Text { text: "original".into() }],
-        details: serde_json::Value::Null,
-    };
+    let original = ToolResult::success("original");
 
     let args = ToolResultArgs {
         name: "some_tool",
@@ -624,29 +645,41 @@ fn test_disposition_value() {
 // Extension init — tool registration via Registry
 // ===================================================================
 
+struct GreetTool;
+
+impl Tool for GreetTool {
+    type State = String;
+
+    fn name(&self) -> &str { "greet" }
+    fn description(&self) -> &str { "Greets someone" }
+    fn parameters(&self) -> &serde_json::Value {
+        static PARAMS: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
+            json!({"type": "object", "properties": {"name": {"type": "string"}}})
+        });
+        &PARAMS
+    }
+
+    fn execute(
+        &self,
+        _tool_call_id: &str,
+        params: serde_json::Value,
+        _cancel: CancelToken,
+    ) -> ToolExecution<Self::State> {
+        let name = params.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("world")
+            .to_owned();
+        ToolExecution::running(async move {
+            ToolResult::success(format!("Hello, {name}!"))
+        })
+    }
+}
+
 struct ToolRegisteringExt;
 
 impl Extension for ToolRegisteringExt {
     fn init(&mut self, registry: &mut mage_core::extension::Registry) {
-        registry.tool(ToolDef {
-            name: "greet".into(),
-            label: "Greet".into(),
-            description: "Greets someone".into(),
-            parameters: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-            execute: Box::new(|_id, params, _cancel| {
-                Box::pin(async move {
-                    let name = params.get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("world");
-                    ToolResult {
-                        content: vec![llm::UserContent::Text {
-                            text: format!("Hello, {name}!"),
-                        }],
-                        details: serde_json::Value::Null,
-                    }
-                })
-            }),
-        });
+        registry.tool(GreetTool);
     }
 }
 
@@ -654,13 +687,12 @@ impl Extension for ToolRegisteringExt {
 async fn test_extension_registers_tool_via_init() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let mut state = AgentState {
-            system_prompt: "test".into(),
-            model: test_model(),
-            messages: vec![AgentMessage::user_text("hi")],
-            tools: vec![],  // No tools initially!
-            options: StreamOptions::default(),
-        };
+        let mut state = AgentState::new(
+            "test",
+            test_model(),
+            vec![AgentMessage::user_text("hi")],
+            StreamOptions::default(),
+        );
         let mut exts: Vec<Box<dyn Extension>> = vec![
             Box::new(ToolRegisteringExt),
         ];
@@ -676,8 +708,8 @@ async fn test_extension_registers_tool_via_init() {
         agent_loop::run(&mut state, &mut exts, &config, &tx, &cancel).await.unwrap();
 
         // After init, the extension should have registered the "greet" tool
-        assert_eq!(state.tools.len(), 1);
-        assert_eq!(&*state.tools[0].name, "greet");
+        assert_eq!(state.llm_tools().len(), 1);
+        assert_eq!(&*state.llm_tools()[0].name, "greet");
     }).await;
 }
 
@@ -685,45 +717,91 @@ async fn test_extension_registers_tool_via_init() {
 // Tool execution through the loop (full cycle)
 // ===================================================================
 
+/// Extension that registers an echo tool via init.
+struct EchoToolExt;
+
+impl Extension for EchoToolExt {
+    fn init(&mut self, registry: &mut mage_core::extension::Registry) {
+        registry.tool(EchoToolForLoop);
+    }
+}
+
+struct EchoToolForLoop;
+
+impl Tool for EchoToolForLoop {
+    type State = String;
+
+    fn name(&self) -> &str { "echo" }
+    fn description(&self) -> &str { "Echoes input" }
+    fn parameters(&self) -> &serde_json::Value {
+        static PARAMS: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
+            json!({"type": "object", "properties": {"text": {"type": "string"}}})
+        });
+        &PARAMS
+    }
+
+    fn execute(
+        &self,
+        _tool_call_id: &str,
+        params: serde_json::Value,
+        _cancel: CancelToken,
+    ) -> ToolExecution<Self::State> {
+        let text = params.get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("no input")
+            .to_owned();
+        ToolExecution::running(async move {
+            ToolResult::success(format!("pong: {text}"))
+        })
+    }
+}
+
 /// StreamFn that first returns a tool call, then on the second call returns text.
 fn tool_use_then_text_stream() -> StreamFn {
     let call_count = std::rc::Rc::new(Cell::new(0u32));
-    Box::new(move |_ctx, _opts, _cancel, tx| {
+    Box::new(move |_req: llm::StreamRequest| {
         let n = call_count.get();
         call_count.set(n + 1);
+        let (tx, rx) = llm::channel::channel();
         if n == 0 {
             // First call: return a tool_use response
-            Box::pin(async move {
-                tx.send(AssistantMessageEvent::Start).ok();
-                tx.send(AssistantMessageEvent::ToolCallStart {
-                    content_index: 0,
-                    id: "call_abc".into(),
-                    name: "echo".into(),
-                }).ok();
-                tx.send(AssistantMessageEvent::ToolCallDelta {
-                    content_index: 0,
-                    delta: r#"{"text":"ping"}"#.into(),
-                }).ok();
-                tx.send(AssistantMessageEvent::ToolCallEnd {
-                    content_index: 0,
-                    arguments: serde_json::json!({"text": "ping"}),
-                }).ok();
-                tx.send(AssistantMessageEvent::Done { reason: StopReason::ToolUse }).ok();
-                Ok(())
-            })
+            llm::StreamHandle {
+                events: rx,
+                task: Box::pin(async move {
+                    tx.send(AssistantMessageEvent::Start).ok();
+                    tx.send(AssistantMessageEvent::ToolCallStart {
+                        content_index: 0,
+                        id: "call_abc".into(),
+                        name: "echo".into(),
+                    }).ok();
+                    tx.send(AssistantMessageEvent::ToolCallDelta {
+                        content_index: 0,
+                        delta: r#"{"text":"ping"}"#.into(),
+                    }).ok();
+                    tx.send(AssistantMessageEvent::ToolCallEnd {
+                        content_index: 0,
+                        arguments: serde_json::json!({"text": "ping"}),
+                    }).ok();
+                    tx.send(AssistantMessageEvent::Done { reason: StopReason::ToolUse }).ok();
+                    Ok(())
+                }),
+            }
         } else {
             // Subsequent calls: return a text response
-            Box::pin(async move {
-                tx.send(AssistantMessageEvent::Start).ok();
-                tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
-                tx.send(AssistantMessageEvent::TextDelta {
-                    content_index: 0,
-                    delta: "Got it: pong".into(),
-                }).ok();
-                tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
-                tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
-                Ok(())
-            })
+            llm::StreamHandle {
+                events: rx,
+                task: Box::pin(async move {
+                    tx.send(AssistantMessageEvent::Start).ok();
+                    tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
+                    tx.send(AssistantMessageEvent::TextDelta {
+                        content_index: 0,
+                        delta: "Got it: pong".into(),
+                    }).ok();
+                    tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
+                    tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
+                    Ok(())
+                }),
+            }
         }
     })
 }
@@ -732,32 +810,15 @@ fn tool_use_then_text_stream() -> StreamFn {
 async fn test_tool_execution_through_loop() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let echo_tool = ToolDef {
-            name: "echo".into(),
-            label: "Echo".into(),
-            description: "Echoes input".into(),
-            parameters: json!({"type": "object", "properties": {"text": {"type": "string"}}}),
-            execute: Box::new(|_id, params, _cancel| {
-                Box::pin(async move {
-                    let text = params.get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("no input");
-                    ToolResult {
-                        content: vec![llm::UserContent::Text { text: format!("pong: {text}") }],
-                        details: serde_json::Value::Null,
-                    }
-                })
-            }),
-        };
-
-        let mut state = AgentState {
-            system_prompt: "test".into(),
-            model: test_model(),
-            messages: vec![AgentMessage::user_text("ping")],
-            tools: vec![echo_tool],
-            options: StreamOptions::default(),
-        };
-        let mut hooks: Vec<Box<dyn Extension>> = vec![];
+        let mut state = AgentState::new(
+            "test",
+            test_model(),
+            vec![AgentMessage::user_text("ping")],
+            StreamOptions::default(),
+        );
+        let mut hooks: Vec<Box<dyn Extension>> = vec![
+            Box::new(EchoToolExt),
+        ];
         let config = LoopConfig {
             max_turns: 10,
             stream_fn: tool_use_then_text_stream(),
@@ -808,68 +869,95 @@ async fn test_tool_execution_through_loop() {
 // Tool execution with blocking hook (through loop)
 // ===================================================================
 
+struct DangerousTool;
+
+impl Tool for DangerousTool {
+    type State = String;
+
+    fn name(&self) -> &str { "dangerous" }
+    fn description(&self) -> &str { "A dangerous tool" }
+    fn parameters(&self) -> &serde_json::Value {
+        static PARAMS: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
+            json!({"type": "object"})
+        });
+        &PARAMS
+    }
+
+    fn execute(
+        &self,
+        _tool_call_id: &str,
+        _params: serde_json::Value,
+        _cancel: CancelToken,
+    ) -> ToolExecution<Self::State> {
+        panic!("should never be called");
+    }
+}
+
+struct DangerousToolExt;
+
+impl Extension for DangerousToolExt {
+    fn init(&mut self, registry: &mut mage_core::extension::Registry) {
+        registry.tool(DangerousTool);
+    }
+}
+
 #[tokio::test]
 async fn test_tool_blocked_through_loop() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let dangerous_tool = ToolDef {
-            name: "dangerous".into(),
-            label: "Dangerous".into(),
-            description: "A dangerous tool".into(),
-            parameters: json!({"type": "object"}),
-            execute: Box::new(|_id, _params, _cancel| {
-                Box::pin(async move {
-                    panic!("should never be called");
-                })
-            }),
-        };
-
         // StreamFn: first call returns tool_use for "dangerous", second returns text stop
         let call_count = std::rc::Rc::new(Cell::new(0u32));
         let stream_fn: StreamFn = {
             let call_count = call_count.clone();
-            Box::new(move |_ctx, _opts, _cancel, tx| {
+            Box::new(move |_req: llm::StreamRequest| {
                 let n = call_count.get();
                 call_count.set(n + 1);
+                let (tx, rx) = llm::channel::channel();
                 if n == 0 {
-                    Box::pin(async move {
-                        tx.send(AssistantMessageEvent::Start).ok();
-                        tx.send(AssistantMessageEvent::ToolCallStart {
-                            content_index: 0,
-                            id: "call_danger".into(),
-                            name: "dangerous".into(),
-                        }).ok();
-                        tx.send(AssistantMessageEvent::ToolCallEnd {
-                            content_index: 0,
-                            arguments: json!({}),
-                        }).ok();
-                        tx.send(AssistantMessageEvent::Done { reason: StopReason::ToolUse }).ok();
-                        Ok(())
-                    })
+                    llm::StreamHandle {
+                        events: rx,
+                        task: Box::pin(async move {
+                            tx.send(AssistantMessageEvent::Start).ok();
+                            tx.send(AssistantMessageEvent::ToolCallStart {
+                                content_index: 0,
+                                id: "call_danger".into(),
+                                name: "dangerous".into(),
+                            }).ok();
+                            tx.send(AssistantMessageEvent::ToolCallEnd {
+                                content_index: 0,
+                                arguments: json!({}),
+                            }).ok();
+                            tx.send(AssistantMessageEvent::Done { reason: StopReason::ToolUse }).ok();
+                            Ok(())
+                        }),
+                    }
                 } else {
-                    Box::pin(async move {
-                        tx.send(AssistantMessageEvent::Start).ok();
-                        tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
-                        tx.send(AssistantMessageEvent::TextDelta {
-                            content_index: 0,
-                            delta: "ok, blocked".into(),
-                        }).ok();
-                        tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
-                        tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
-                        Ok(())
-                    })
+                    llm::StreamHandle {
+                        events: rx,
+                        task: Box::pin(async move {
+                            tx.send(AssistantMessageEvent::Start).ok();
+                            tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
+                            tx.send(AssistantMessageEvent::TextDelta {
+                                content_index: 0,
+                                delta: "ok, blocked".into(),
+                            }).ok();
+                            tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
+                            tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
+                            Ok(())
+                        }),
+                    }
                 }
             })
         };
 
-        let mut state = AgentState {
-            system_prompt: "test".into(),
-            model: test_model(),
-            messages: vec![AgentMessage::user_text("do dangerous thing")],
-            tools: vec![dangerous_tool],
-            options: StreamOptions::default(),
-        };
+        let mut state = AgentState::new(
+            "test",
+            test_model(),
+            vec![AgentMessage::user_text("do dangerous thing")],
+            StreamOptions::default(),
+        );
         let mut hooks: Vec<Box<dyn Extension>> = vec![
+            Box::new(DangerousToolExt),
             Box::new(ToolBlocker {
                 blocked_name: "dangerous".into(),
                 block_count: 0,
@@ -906,26 +994,23 @@ struct TestProvider {
 }
 
 impl llm::Provider for TestProvider {
-    fn stream(
-        &self,
-        _model: Model,
-        _context: llm::Context,
-        _options: StreamOptions,
-        _cancel: CancelToken,
-        tx: llm::channel::Sender<AssistantMessageEvent>,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), llm::ProviderError>>>> {
+    fn stream(&self, _req: llm::StreamRequest) -> llm::StreamHandle {
         let text = self.response_text.clone();
-        Box::pin(async move {
-            tx.send(AssistantMessageEvent::Start).ok();
-            tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
-            tx.send(AssistantMessageEvent::TextDelta {
-                content_index: 0,
-                delta: text.as_str().into(),
-            }).ok();
-            tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
-            tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
-            Ok(())
-        })
+        let (tx, rx) = llm::channel::channel();
+        llm::StreamHandle {
+            events: rx,
+            task: Box::pin(async move {
+                tx.send(AssistantMessageEvent::Start).ok();
+                tx.send(AssistantMessageEvent::TextStart { content_index: 0 }).ok();
+                tx.send(AssistantMessageEvent::TextDelta {
+                    content_index: 0,
+                    delta: text.as_str().into(),
+                }).ok();
+                tx.send(AssistantMessageEvent::TextEnd { content_index: 0 }).ok();
+                tx.send(AssistantMessageEvent::Done { reason: StopReason::Stop }).ok();
+                Ok(())
+            }),
+        }
     }
 }
 

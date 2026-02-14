@@ -61,13 +61,13 @@ impl Usage {
 pub enum ContentBlock {
     #[serde(rename = "text")]
     Text {
-        text: String,
+        text: Str,
         #[serde(skip_serializing_if = "Option::is_none")]
         text_signature: Option<Str>,
     },
     #[serde(rename = "thinking")]
     Thinking {
-        thinking: String,
+        thinking: Str,
         #[serde(skip_serializing_if = "Option::is_none")]
         thinking_signature: Option<Str>,
     },

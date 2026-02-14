@@ -48,24 +48,24 @@ pub fn apply_event(msg: &mut AssistantMessage, event: &AssistantMessageEvent) {
     match event {
         AssistantMessageEvent::TextStart { .. } => {
             msg.content.push(ContentBlock::Text {
-                text: String::new(),
+                text: Str::new(),
                 text_signature: None,
             });
         }
         AssistantMessageEvent::TextDelta { content_index, delta } => {
             if let Some(ContentBlock::Text { text, .. }) = msg.content.get_mut(*content_index) {
-                text.push_str(delta);
+                text.make_mut().push_str(delta);
             }
         }
         AssistantMessageEvent::ThinkingStart { .. } => {
             msg.content.push(ContentBlock::Thinking {
-                thinking: String::new(),
+                thinking: Str::new(),
                 thinking_signature: None,
             });
         }
         AssistantMessageEvent::ThinkingDelta { content_index, delta } => {
             if let Some(ContentBlock::Thinking { thinking, .. }) = msg.content.get_mut(*content_index) {
-                thinking.push_str(delta);
+                thinking.make_mut().push_str(delta);
             }
         }
         AssistantMessageEvent::ToolCallStart { id, name, .. } => {
