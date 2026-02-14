@@ -823,6 +823,7 @@ dependencies = [
 name = "mage"
 version = "0.1.0"
 dependencies = [
+ "mage-app",
  "mage-build",
  "mage-core",
  "mage-llm",
@@ -840,6 +841,17 @@ dependencies = [
  "refstr",
  "reqwest",
  "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mage-app"
+version = "0.1.0"
+dependencies = [
+ "mage-core",
+ "mage-llm",
+ "refstr",
  "serde_json",
  "tokio",
 ]

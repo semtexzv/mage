@@ -43,6 +43,9 @@ pub use mage_core::session;
 /// Agent loop (usually not needed by extensions directly).
 pub use mage_core::agent_loop;
 
+/// Application layer: commands, input routing, session lifecycle.
+pub use mage_app as app;
+
 /// Agent event stream types.
 pub use mage_core::event_stream;
 
@@ -63,9 +66,9 @@ pub mod prelude {
     // Extension system
     pub use crate::extension::{
         Extension, Registry, FactoryRegistry, HookFuture,
-        Disposition, BeforeStartAmend, ToolResultAmend, InputAmend,
+        Disposition, ToolResultAmend, InputAmend,
         ContextAmend, CompactAmend, BashAmend,
-        ToolCallArgs, ToolResultArgs, BeforeStartArgs, TurnEndArgs,
+        ToolCallArgs, ToolResultArgs, TurnEndArgs,
         MessageArgs, MessageDeltaArgs, ToolExecStartArgs, ToolExecEndArgs,
         BeforeForkArgs, UserBashArgs, AgentEndArgs, ModelSelectArgs,
     };
@@ -90,4 +93,6 @@ pub mod prelude {
 
     // Strings
     pub use refstr::Str;
+    pub use crate::app::command::{Command, CommandRegistry, CommandError};
+    pub use crate::app::app::{App, AppError};
 }

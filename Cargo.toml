@@ -4,6 +4,7 @@ members = [
     "pkg/refstr",
     "pkg/llm",
     "pkg/core",
+    "pkg/app",
     "pkg/tui",
     "pkg/build",
     "providers/anthropic",

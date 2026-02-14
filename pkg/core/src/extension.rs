@@ -69,11 +69,6 @@ impl<T> Default for Disposition<T> {
 // Amendment types — the T in Disposition<T>
 // ---------------------------------------------------------------------------
 
-pub struct BeforeStartAmend {
-    pub system_prompt: Option<String>,
-    pub inject_message: Option<Message>,
-}
-
 pub struct ToolResultAmend {
     pub content: Option<Vec<UserContent>>,
     pub is_error: Option<bool>,
@@ -114,11 +109,6 @@ pub struct ToolResultArgs<'a> {
     pub id: &'a str,
     pub result: &'a ToolResult,
     pub is_error: bool,
-}
-
-pub struct BeforeStartArgs<'a> {
-    pub system_prompt: &'a str,
-    pub prompt: &'a str,
 }
 
 pub struct TurnEndArgs<'a> {
@@ -239,15 +229,6 @@ pub trait Extension {
     ) -> HookFuture<'a, Disposition> {
         Box::pin(async { Disposition::Propagate })
     }
-
-    fn on_before_start<'a>(
-        &'a mut self,
-        args: &'a BeforeStartArgs<'a>,
-        session: &'a mut AgentSession,
-    ) -> HookFuture<'a, Disposition<BeforeStartAmend>> {
-        Box::pin(async { Disposition::Propagate })
-    }
-
     fn on_tool_result<'a>(
         &'a mut self,
         args: &'a ToolResultArgs<'a>,
