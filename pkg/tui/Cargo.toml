@@ -1,0 +1,16 @@
+[package]
+name = "mage-tui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mage_tui"
+
+[dependencies]
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+unicode-width = "0.2"
+unicode-segmentation = "1.10"
+pulldown-cmark = { version = "0.13", default-features = false }

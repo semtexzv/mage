@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "pkg/refstr",
+    "pkg/llm",
+    "pkg/core",
+    "pkg/tui",
+    "pkg/build",
+    "providers/anthropic",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }

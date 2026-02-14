@@ -1,0 +1,17 @@
+use std::path::PathBuf;
+
+/// Returns the default `.mr` application root directory for the current user.
+#[must_use]
+pub fn default_approot() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".mr")
+}
+
+pub mod bundle;
+pub mod compile;
+pub mod deps;
+pub mod downloader;
+pub mod error;
+pub mod module;
+pub mod toolchain;

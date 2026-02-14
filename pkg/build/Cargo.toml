@@ -1,0 +1,35 @@
+[package]
+name = "mage-build"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mage_build"
+
+[dependencies]
+anyhow = "1"
+minijinja = "2.11"
+petname = { version = "2.0", default-features = false, features = ["default-words"] }
+quote = "1"
+sha2 = "0.10"
+serde.workspace = true
+serde_json.workspace = true
+syn = { version = "2", features = ["full"] }
+tar = "0.4"
+tempfile = "3"
+thiserror = "2"
+which = "8"
+xz2 = "0.1"
+toml = "1"
+regex = "1"
+walkdir = "2"
+pathdiff = "0.2"
+semver = "1"
+dirs = "6"
+tokio = { version = "1", features = ["fs", "rt"], optional = true }
+reqwest = { version = "0.12", optional = true }
+
+[features]
+default = ["tokio"]
+tokio = ["dep:reqwest", "dep:tokio"]
