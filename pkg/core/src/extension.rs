@@ -21,16 +21,23 @@
 //! responsibility — use `Rc<RefCell<>>` internally. The framework doesn't
 //! impose a sharing model.
 //!
+//! ## Hook dispatch
+//!
+//! During hook dispatch, extensions are temporarily removed from
+//! `AgentSession.exts` via `mem::take`. Hooks receive `&mut AgentSession`
+//! with `exts` empty. This avoids borrow conflicts while giving hooks
+//! full mutable access to session state, inject queue, etc.
 
 use std::future::Future;
 use std::pin::Pin;
 
 use refstr::Str;
 
-use llm::{AssistantMessageEvent, CancelToken, Model, ToolResultMessage, UserContent};
+use llm::{AssistantMessageEvent, ToolResultMessage, UserContent, Model};
 
+use crate::session::AgentSession;
 use crate::tool::{ErasedTool, Tool, ToolResult, erase_tool};
-use crate::types::{AgentMessage, DeliverAs};
+use crate::types::AgentMessage;
 
 // ---------------------------------------------------------------------------
 // Disposition — what a decision hook returns
@@ -155,47 +162,6 @@ pub struct ModelSelectArgs<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// HookCtx — split borrows, no Rc
-// ---------------------------------------------------------------------------
-
-/// Context passed to hook methods. Read access to agent state,
-/// write access to the outbox for message injection.
-///
-/// Created by the agent loop via split borrows before each hook call.
-pub struct HookCtx<'a> {
-    pub model: &'a Model,
-    pub system_prompt: &'a str,
-    outbox: &'a mut Vec<(AgentMessage, DeliverAs)>,
-    cancel: &'a CancelToken,
-}
-
-impl<'a> HookCtx<'a> {
-    pub fn new(
-        model: &'a Model,
-        system_prompt: &'a str,
-        outbox: &'a mut Vec<(AgentMessage, DeliverAs)>,
-        cancel: &'a CancelToken,
-    ) -> Self {
-        Self { model, system_prompt, outbox, cancel }
-    }
-
-    /// Queue a message for delivery to the agent.
-    pub fn send_message(&mut self, msg: AgentMessage, deliver: DeliverAs) {
-        self.outbox.push((msg, deliver));
-    }
-
-    /// Cancel the current operation.
-    pub fn abort(&self) {
-        self.cancel.cancel();
-    }
-
-    /// Check if cancelled.
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Registry — passed to Extension::init for tool/provider registration
 // ---------------------------------------------------------------------------
 
@@ -234,6 +200,10 @@ pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// across its tools, it manages that internally (e.g. `Rc<RefCell<>>`).
 ///
 /// **Observe hooks** are sync. **Decision hooks** return `HookFuture`.
+///
+/// During hook dispatch, extensions are temporarily removed from
+/// `session.exts` via `mem::take`. Hooks receive `&mut AgentSession`
+/// with `exts` empty.
 #[allow(unused_variables)]
 pub trait Extension {
     /// Called once when the agent loop starts. Register tools, providers,
@@ -244,19 +214,19 @@ pub trait Extension {
     // Observe — sync, fire-and-forget
     // ===================================================================
 
-    fn on_agent_start(&mut self, ctx: &HookCtx) {}
-    fn on_agent_end(&mut self, args: &AgentEndArgs, ctx: &HookCtx) {}
-    fn on_turn_start(&mut self, ctx: &HookCtx) {}
-    fn on_turn_end(&mut self, args: &TurnEndArgs, ctx: &HookCtx) {}
-    fn on_model_select(&mut self, args: &ModelSelectArgs, ctx: &HookCtx) {}
-    fn on_session_start(&mut self, ctx: &HookCtx) {}
-    fn on_session_switch(&mut self, ctx: &HookCtx) {}
-    fn on_session_shutdown(&mut self, ctx: &HookCtx) {}
-    fn on_message_start(&mut self, args: &MessageArgs, ctx: &HookCtx) {}
-    fn on_message_delta(&mut self, args: &MessageDeltaArgs, ctx: &HookCtx) {}
-    fn on_message_end(&mut self, args: &MessageArgs, ctx: &HookCtx) {}
-    fn on_tool_exec_start(&mut self, args: &ToolExecStartArgs, ctx: &HookCtx) {}
-    fn on_tool_exec_end(&mut self, args: &ToolExecEndArgs, ctx: &HookCtx) {}
+    fn on_agent_start(&mut self, session: &mut AgentSession) {}
+    fn on_agent_end(&mut self, args: &AgentEndArgs, session: &mut AgentSession) {}
+    fn on_turn_start(&mut self, session: &mut AgentSession) {}
+    fn on_turn_end(&mut self, args: &TurnEndArgs, session: &mut AgentSession) {}
+    fn on_model_select(&mut self, args: &ModelSelectArgs, session: &mut AgentSession) {}
+    fn on_session_start(&mut self, session: &mut AgentSession) {}
+    fn on_session_switch(&mut self, session: &mut AgentSession) {}
+    fn on_session_shutdown(&mut self, session: &mut AgentSession) {}
+    fn on_message_start(&mut self, args: &MessageArgs, session: &mut AgentSession) {}
+    fn on_message_delta(&mut self, args: &MessageDeltaArgs, session: &mut AgentSession) {}
+    fn on_message_end(&mut self, args: &MessageArgs, session: &mut AgentSession) {}
+    fn on_tool_exec_start(&mut self, args: &ToolExecStartArgs, session: &mut AgentSession) {}
+    fn on_tool_exec_end(&mut self, args: &ToolExecEndArgs, session: &mut AgentSession) {}
 
     // ===================================================================
     // Decision — async, return Disposition<T>
@@ -265,7 +235,7 @@ pub trait Extension {
     fn on_tool_call<'a>(
         &'a mut self,
         args: &'a ToolCallArgs<'a>,
-        ctx: &'a HookCtx,
+        session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition> {
         Box::pin(async { Disposition::Propagate })
     }
@@ -273,7 +243,7 @@ pub trait Extension {
     fn on_before_start<'a>(
         &'a mut self,
         args: &'a BeforeStartArgs<'a>,
-        ctx: &'a HookCtx,
+        session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<BeforeStartAmend>> {
         Box::pin(async { Disposition::Propagate })
     }
@@ -281,7 +251,7 @@ pub trait Extension {
     fn on_tool_result<'a>(
         &'a mut self,
         args: &'a ToolResultArgs<'a>,
-        ctx: &'a HookCtx,
+        session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<ToolResultAmend>> {
         Box::pin(async { Disposition::Propagate })
     }
@@ -289,7 +259,7 @@ pub trait Extension {
     fn on_input<'a>(
         &'a mut self,
         text: &'a str,
-        ctx: &'a HookCtx,
+        session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<InputAmend>> {
         Box::pin(async { Disposition::Propagate })
     }
@@ -297,14 +267,14 @@ pub trait Extension {
     fn on_context<'a>(
         &'a mut self,
         messages: &'a [AgentMessage],
-        ctx: &'a HookCtx,
+        session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<ContextAmend>> {
         Box::pin(async { Disposition::Propagate })
     }
 
     fn on_before_switch<'a>(
         &'a mut self,
-        ctx: &'a HookCtx,
+        session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition> {
         Box::pin(async { Disposition::Propagate })
     }
@@ -312,14 +282,14 @@ pub trait Extension {
     fn on_before_fork<'a>(
         &'a mut self,
         args: &'a BeforeForkArgs<'a>,
-        ctx: &'a HookCtx,
+        session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition> {
         Box::pin(async { Disposition::Propagate })
     }
 
     fn on_before_compact<'a>(
         &'a mut self,
-        ctx: &'a HookCtx,
+        session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<CompactAmend>> {
         Box::pin(async { Disposition::Propagate })
     }
@@ -327,7 +297,7 @@ pub trait Extension {
     fn on_user_bash<'a>(
         &'a mut self,
         args: &'a UserBashArgs<'a>,
-        ctx: &'a HookCtx,
+        session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<BashAmend>> {
         Box::pin(async { Disposition::Propagate })
     }

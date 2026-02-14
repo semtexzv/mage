@@ -34,8 +34,11 @@ pub use mage_core::tool;
 /// Agent message types, events, delivery modes.
 pub use mage_core::types;
 
-/// Agent struct, builder, init recipe.
+/// Agent builder and init recipe.
 pub use mage_core::agent;
+
+/// Session — primary runtime wrapper.
+pub use mage_core::session;
 
 /// Agent loop (usually not needed by extensions directly).
 pub use mage_core::agent_loop;
@@ -59,13 +62,16 @@ pub use mage_build as build;
 pub mod prelude {
     // Extension system
     pub use crate::extension::{
-        Extension, Registry, FactoryRegistry, HookCtx, HookFuture,
+        Extension, Registry, FactoryRegistry, HookFuture,
         Disposition, BeforeStartAmend, ToolResultAmend, InputAmend,
         ContextAmend, CompactAmend, BashAmend,
         ToolCallArgs, ToolResultArgs, BeforeStartArgs, TurnEndArgs,
         MessageArgs, MessageDeltaArgs, ToolExecStartArgs, ToolExecEndArgs,
         BeforeForkArgs, UserBashArgs, AgentEndArgs, ModelSelectArgs,
     };
+
+    // Session
+    pub use crate::session::{AgentSession, SessionHandle};
 
     // Tools
     pub use crate::tool::{

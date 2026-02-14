@@ -1,22 +1,24 @@
 //! Agent loop — the sequential async flow that drives the agent.
 //!
 //! Everything is sequential. Only LLM streaming uses a channel.
-//! Hook dispatch is `Vec<Box<dyn Extension>>` iterated at each interception point.
+//! Hook dispatch uses `mem::take` to temporarily remove extensions
+//! from the session, then passes `&mut AgentSession` to each hook.
 
 use std::time::Duration;
 
 use llm::{
-    AssistantMessage, CancelToken, ContentBlock,
+    AssistantMessage, ContentBlock,
     Message, StopReason,
 };
 
 use crate::event_stream::AgentEventSender;
 use crate::extension::{
-    Disposition, Extension, HookCtx, MessageArgs, MessageDeltaArgs,
+    Disposition, MessageArgs, MessageDeltaArgs,
     ToolCallArgs, ToolExecEndArgs, ToolExecStartArgs,
     ToolResultArgs, TurnEndArgs, AgentEndArgs, ContextAmend, Registry,
 };
-use crate::types::{AgentEvent, AgentMessage, AgentState, DeliverAs};
+use crate::session::AgentSession;
+use crate::types::{AgentEvent, AgentMessage};
 use crate::tool::{ToolResult, ToolContent};
 
 const MAX_LLM_RETRIES: u32 = 3;
@@ -56,6 +58,8 @@ impl std::error::Error for LoopError {}
 pub type StreamFn = Box<
     dyn Fn(llm::StreamRequest) -> llm::StreamHandle,
 >;
+
+/// Configuration for a single agent loop run.
 pub struct LoopConfig {
     pub max_turns: u32,
     pub stream_fn: StreamFn,
@@ -64,34 +68,31 @@ pub struct LoopConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Agent loop
+// Agent loop — takes &mut AgentSession
 // ---------------------------------------------------------------------------
 
 pub async fn run(
-    state: &mut AgentState,
-    hooks: &mut [Box<dyn Extension>],
-    config: &LoopConfig,
+    session: &mut AgentSession,
     events: &AgentEventSender,
-    cancel: &CancelToken,
 ) -> Result<(), LoopError> {
+    session.set_running(true);
+
     // --- extension init: let each extension register tools/providers ---
     {
+        let mut exts = std::mem::take(&mut session.exts);
         let mut ext_providers = Vec::new();
         let mut registry = Registry {
-            tools: &mut state.tools,
+            tools: &mut session.state.tools,
             providers: &mut ext_providers,
         };
-        for ext in hooks.iter_mut() {
+        for ext in exts.iter_mut() {
             ext.init(&mut registry);
         }
+        session.exts = exts;
         // Extension-registered providers are currently unused by the loop
         // (stream_fn is pre-built). Reserved for future use.
         let _ = ext_providers;
     }
-
-    // The outbox lives here, not in AgentState. Hooks push into it via HookCtx,
-    // the loop drains it after each hook call.
-    let mut outbox: Vec<(AgentMessage, DeliverAs)> = Vec::new();
 
     // Queues for steering and follow-up messages.
     let mut steering_queue: Vec<AgentMessage> = Vec::new();
@@ -99,52 +100,59 @@ pub async fn run(
 
     // --- agent_start ---
     events.push(AgentEvent::AgentStart);
-    fire_observe!(hooks, on_agent_start, state, &mut outbox, cancel);
-    drain_outbox(&mut outbox, &mut steering_queue, &mut follow_up_queue);
+    fire_observe!(session, on_agent_start);
+    session.drain_inject(&mut steering_queue, &mut follow_up_queue);
 
     let mut turn_count: u32 = 0;
 
     loop {
-        if cancel.is_cancelled() {
+        if session.cancel.is_cancelled() {
+            session.set_running(false);
             return Err(LoopError::Cancelled);
         }
-        if config.max_turns > 0 && turn_count >= config.max_turns {
-            return Err(LoopError::MaxTurnsExceeded(config.max_turns));
+        if session.config.max_turns > 0 && turn_count >= session.config.max_turns {
+            session.set_running(false);
+            return Err(LoopError::MaxTurnsExceeded(session.config.max_turns));
         }
         turn_count += 1;
 
         // --- turn_start ---
         events.push(AgentEvent::TurnStart);
-        fire_observe!(hooks, on_turn_start, state, &mut outbox, cancel);
-        drain_outbox(&mut outbox, &mut steering_queue, &mut follow_up_queue);
+        fire_observe!(session, on_turn_start);
+        session.drain_inject(&mut steering_queue, &mut follow_up_queue);
 
         // --- on_context (chain): hooks may replace message list ---
         let llm_messages = {
-            let mut agent_messages = state.messages.clone();
-            for h in hooks.iter_mut() {
-                let ctx = HookCtx::new(&state.model, &state.system_prompt, &mut outbox, cancel);
-                let d = h.on_context(&agent_messages, &ctx).await;
+            let mut agent_messages = session.state.messages.clone();
+            let mut exts = std::mem::take(&mut session.exts);
+            for h in exts.iter_mut() {
+                let d = h.on_context(&agent_messages, session).await;
                 match d {
                     Disposition::Propagate => {}
-                    Disposition::Block { .. } => return Err(LoopError::Cancelled),
+                    Disposition::Block { .. } => {
+                        session.exts = exts;
+                        session.set_running(false);
+                        return Err(LoopError::Cancelled);
+                    }
                     Disposition::Value(ContextAmend { messages }) => {
                         agent_messages = messages;
                     }
                 }
             }
-            drain_outbox(&mut outbox, &mut steering_queue, &mut follow_up_queue);
-            (config.convert_to_llm)(&agent_messages)
+            session.exts = exts;
+            session.drain_inject(&mut steering_queue, &mut follow_up_queue);
+            (session.config.convert_to_llm)(&agent_messages)
         };
 
         // --- stream LLM ---
         let assistant_msg = stream_llm(
-            state, hooks, config, events, cancel, &mut outbox, llm_messages,
+            session, events, llm_messages,
         )
         .await?;
 
         // Add assistant message to conversation
         let final_agent_msg = AgentMessage::Llm(Message::Assistant(assistant_msg.clone()));
-        state.messages.push(final_agent_msg.clone());
+        session.state.messages.push(final_agent_msg.clone());
 
         // --- tool execution ---
         let tool_calls: Vec<_> = assistant_msg
@@ -160,8 +168,8 @@ pub async fn run(
 
         let tool_result_messages = if !tool_calls.is_empty() {
             execute_tools(
-                state, hooks, events, cancel,
-                &mut outbox, &mut steering_queue, &mut follow_up_queue,
+                session, events,
+                &mut steering_queue, &mut follow_up_queue,
                 &tool_calls,
             )
             .await
@@ -179,16 +187,17 @@ pub async fn run(
                 message: &final_agent_msg,
                 tool_results: &tool_result_messages,
             };
-            for h in hooks.iter_mut() {
-                let ctx = HookCtx::new(&state.model, &state.system_prompt, &mut outbox, cancel);
-                h.on_turn_end(&args, &ctx);
+            let mut exts = std::mem::take(&mut session.exts);
+            for h in exts.iter_mut() {
+                h.on_turn_end(&args, session);
             }
+            session.exts = exts;
         }
-        drain_outbox(&mut outbox, &mut steering_queue, &mut follow_up_queue);
+        session.drain_inject(&mut steering_queue, &mut follow_up_queue);
 
         // Add tool results to conversation
         for trm in &tool_result_messages {
-            state.messages.push(AgentMessage::Llm(Message::ToolResult(trm.clone())));
+            session.state.messages.push(AgentMessage::Llm(Message::ToolResult(trm.clone())));
         }
 
         // If stop reason wasn't ToolUse, check follow-ups or finish
@@ -196,27 +205,29 @@ pub async fn run(
             if follow_up_queue.is_empty() {
                 break;
             }
-            state.messages.extend(follow_up_queue.drain(..));
+            session.state.messages.extend(follow_up_queue.drain(..));
             continue;
         }
 
         // Continuing to next turn — LLM will see tool results
         if !follow_up_queue.is_empty() {
-            state.messages.extend(follow_up_queue.drain(..));
+            session.state.messages.extend(follow_up_queue.drain(..));
         }
     }
 
     // --- agent_end ---
-    let final_messages = state.messages.clone();
+    let final_messages = session.state.messages.clone();
     events.push(AgentEvent::AgentEnd { messages: final_messages.clone() });
     {
         let args = AgentEndArgs { messages: &final_messages };
-        for h in hooks.iter_mut() {
-            let ctx = HookCtx::new(&state.model, &state.system_prompt, &mut outbox, cancel);
-            h.on_agent_end(&args, &ctx);
+        let mut exts = std::mem::take(&mut session.exts);
+        for h in exts.iter_mut() {
+            h.on_agent_end(&args, session);
         }
+        session.exts = exts;
     }
 
+    session.set_running(false);
     Ok(())
 }
 
@@ -225,18 +236,14 @@ pub async fn run(
 // ---------------------------------------------------------------------------
 
 async fn stream_llm(
-    state: &AgentState,
-    hooks: &mut [Box<dyn Extension>],
-    config: &LoopConfig,
+    session: &mut AgentSession,
     events: &AgentEventSender,
-    cancel: &CancelToken,
-    outbox: &mut Vec<(AgentMessage, DeliverAs)>,
     llm_messages: Vec<Message>,
 ) -> Result<AssistantMessage, LoopError> {
     let llm_context = llm::Context {
-        system_prompt: Some(state.system_prompt.as_str().into()),
+        system_prompt: Some(session.state.system_prompt.as_str().into()),
         messages: llm_messages,
-        tools: if state.tools.is_empty() { None } else { Some(state.llm_tools()) },
+        tools: if session.state.tools.is_empty() { None } else { Some(session.state.llm_tools()) },
     };
 
     let mut last_error: Option<llm::ProviderError> = None;
@@ -245,7 +252,7 @@ async fn stream_llm(
         if attempt > 0 {
             // We are retrying — compute delay and sleep
             let prev_err = last_error.as_ref().unwrap();
-            let delay = retry_delay_ms(prev_err, attempt - 1, &config.options);
+            let delay = retry_delay_ms(prev_err, attempt - 1, &session.config.options);
             match delay {
                 None => {
                     // Delay exceeds max_retry_delay_ms — stop retrying
@@ -255,22 +262,22 @@ async fn stream_llm(
                     tokio::time::sleep(Duration::from_millis(ms)).await;
                 }
             }
-            if cancel.is_cancelled() {
+            if session.cancel.is_cancelled() {
                 return Err(LoopError::Cancelled);
             }
         }
-        let handle = (config.stream_fn)(llm::StreamRequest {
-            model: state.model.clone(),
+        let handle = (session.config.stream_fn)(llm::StreamRequest {
+            model: session.state.model.clone(),
             context: llm_context.clone(),
-            options: config.options.clone(),
-            cancel: cancel.clone(),
+            options: session.config.options.clone(),
+            cancel: session.cancel.clone(),
         });
         let mut rx = handle.events;
         let stream_handle = tokio::task::spawn_local(handle.task);
         let mut assistant_msg = AssistantMessage::empty(
-            state.model.api.clone(),
-            state.model.provider.clone(),
-            state.model.id.clone(),
+            session.state.model.api.clone(),
+            session.state.model.provider.clone(),
+            session.state.model.id.clone(),
             StopReason::Stop,
         );
     // message_start
@@ -278,10 +285,11 @@ async fn stream_llm(
             let msg = AgentMessage::Llm(Message::Assistant(assistant_msg.clone()));
             events.push(AgentEvent::MessageStart { message: msg.clone() });
             let args = MessageArgs { message: &msg };
-            for h in hooks.iter_mut() {
-                let ctx = HookCtx::new(&state.model, &state.system_prompt, outbox, cancel);
-                h.on_message_start(&args, &ctx);
+            let mut exts = std::mem::take(&mut session.exts);
+            for h in exts.iter_mut() {
+                h.on_message_start(&args, session);
             }
+            session.exts = exts;
         }
     // Read events
         while let Some(event) = rx.recv().await {
@@ -294,10 +302,11 @@ async fn stream_llm(
 
             {
                 let delta_args = MessageDeltaArgs { event: &event };
-                for h in hooks.iter_mut() {
-                    let ctx = HookCtx::new(&state.model, &state.system_prompt, outbox, cancel);
-                    h.on_message_delta(&delta_args, &ctx);
+                let mut exts = std::mem::take(&mut session.exts);
+                for h in exts.iter_mut() {
+                    h.on_message_delta(&delta_args, session);
                 }
+                session.exts = exts;
             }
             if event.is_terminal() {
                 break;
@@ -315,15 +324,16 @@ async fn stream_llm(
                     let msg = AgentMessage::Llm(Message::Assistant(assistant_msg.clone()));
                     events.push(AgentEvent::MessageEnd { message: msg.clone() });
                     let args = MessageArgs { message: &msg };
-                    for h in hooks.iter_mut() {
-                        let ctx = HookCtx::new(&state.model, &state.system_prompt, outbox, cancel);
-                        h.on_message_end(&args, &ctx);
+                    let mut exts = std::mem::take(&mut session.exts);
+                    for h in exts.iter_mut() {
+                        h.on_message_end(&args, session);
                     }
+                    session.exts = exts;
                 }
                 return Ok(assistant_msg);
             }
             Err(e) => {
-                if matches!(e, llm::ProviderError::Cancelled) && cancel.is_cancelled() {
+                if matches!(e, llm::ProviderError::Cancelled) && session.cancel.is_cancelled() {
                     return Err(LoopError::Cancelled);
                 }
                 if !is_retryable(&e) || attempt == MAX_LLM_RETRIES {
@@ -332,10 +342,11 @@ async fn stream_llm(
                         let msg = AgentMessage::Llm(Message::Assistant(assistant_msg.clone()));
                         events.push(AgentEvent::MessageEnd { message: msg.clone() });
                         let args = MessageArgs { message: &msg };
-                        for h in hooks.iter_mut() {
-                            let ctx = HookCtx::new(&state.model, &state.system_prompt, outbox, cancel);
-                            h.on_message_end(&args, &ctx);
+                        let mut exts = std::mem::take(&mut session.exts);
+                        for h in exts.iter_mut() {
+                            h.on_message_end(&args, session);
                         }
+                        session.exts = exts;
                     }
                     return Err(LoopError::Provider(e));
                 }
@@ -355,11 +366,8 @@ async fn stream_llm(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_tools(
-    state: &mut AgentState,
-    hooks: &mut [Box<dyn Extension>],
+    session: &mut AgentSession,
     events: &AgentEventSender,
-    cancel: &CancelToken,
-    outbox: &mut Vec<(AgentMessage, DeliverAs)>,
     steering_queue: &mut Vec<AgentMessage>,
     follow_up_queue: &mut Vec<AgentMessage>,
     tool_calls: &[(refstr::Str, refstr::Str, serde_json::Value)],
@@ -367,39 +375,42 @@ async fn execute_tools(
     let mut tool_result_messages = Vec::new();
 
     for (call_id, call_name, call_args) in tool_calls {
-        if cancel.is_cancelled() {
+        if session.cancel.is_cancelled() {
             break;
         }
 
         // --- on_tool_call (short-circuit) ---
         let mut blocked = false;
-        for h in hooks.iter_mut() {
-            let tc_args = ToolCallArgs {
-                name: call_name,
-                id: call_id,
-                args: call_args,
-            };
-            let ctx = HookCtx::new(&state.model, &state.system_prompt, outbox, cancel);
-            match h.on_tool_call(&tc_args, &ctx).await {
-                Disposition::Propagate | Disposition::Value(()) => {}
-                Disposition::Block { reason } => {
-                    tool_result_messages.push(make_error_result(
-                        call_id.clone(),
-                        call_name.clone(),
-                        format!("Tool call blocked: {reason}"),
-                    ));
-                    blocked = true;
-                    break;
+        {
+            let mut exts = std::mem::take(&mut session.exts);
+            for h in exts.iter_mut() {
+                let tc_args = ToolCallArgs {
+                    name: call_name,
+                    id: call_id,
+                    args: call_args,
+                };
+                match h.on_tool_call(&tc_args, session).await {
+                    Disposition::Propagate | Disposition::Value(()) => {}
+                    Disposition::Block { reason } => {
+                        tool_result_messages.push(make_error_result(
+                            call_id.clone(),
+                            call_name.clone(),
+                            format!("Tool call blocked: {reason}"),
+                        ));
+                        blocked = true;
+                        break;
+                    }
                 }
             }
+            session.exts = exts;
         }
-        drain_outbox(outbox, steering_queue, follow_up_queue);
+        session.drain_inject(steering_queue, follow_up_queue);
         if blocked {
             continue;
         }
 
         // Find the tool
-        let tool_idx = match state.tools.iter().position(|t| t.name() == &**call_name) {
+        let tool_idx = match session.state.tools.iter().position(|t| t.name() == &**call_name) {
             Some(i) => i,
             None => {
                 tool_result_messages.push(make_error_result(
@@ -419,15 +430,16 @@ async fn execute_tools(
         });
         {
             let args = ToolExecStartArgs { name: call_name, args: call_args };
-            for h in hooks.iter_mut() {
-                let ctx = HookCtx::new(&state.model, &state.system_prompt, outbox, cancel);
-                h.on_tool_exec_start(&args, &ctx);
+            let mut exts = std::mem::take(&mut session.exts);
+            for h in exts.iter_mut() {
+                h.on_tool_exec_start(&args, session);
             }
+            session.exts = exts;
         }
 
         // Execute the tool
-        let erased_exec = state.tools[tool_idx].execute(
-            call_id, call_args.clone(), cancel.clone(),
+        let erased_exec = session.state.tools[tool_idx].execute(
+            call_id, call_args.clone(), session.cancel.clone(),
         );
         let mut result = match erased_exec {
             crate::tool::ErasedExecution::Ready(r) => r,
@@ -437,32 +449,35 @@ async fn execute_tools(
         let mut is_error = result.is_error();
 
         // --- on_tool_result (chain) ---
-        for h in hooks.iter_mut() {
-            let tr_args = ToolResultArgs {
-                name: call_name,
-                id: call_id,
-                result: &result,
-                is_error,
-            };
-            let ctx = HookCtx::new(&state.model, &state.system_prompt, outbox, cancel);
-            match h.on_tool_result(&tr_args, &ctx).await {
-                Disposition::Propagate => {}
-                Disposition::Block { .. } => break,
-                Disposition::Value(amend) => {
-                    if let Some(content) = amend.content {
-                        result = if is_error {
-                            ToolResult::Failure(ToolContent::rich(content))
-                        } else {
-                            ToolResult::Success(ToolContent::rich(content))
-                        };
-                    }
-                    if let Some(err) = amend.is_error {
-                        is_error = err;
+        {
+            let mut exts = std::mem::take(&mut session.exts);
+            for h in exts.iter_mut() {
+                let tr_args = ToolResultArgs {
+                    name: call_name,
+                    id: call_id,
+                    result: &result,
+                    is_error,
+                };
+                match h.on_tool_result(&tr_args, session).await {
+                    Disposition::Propagate => {}
+                    Disposition::Block { .. } => break,
+                    Disposition::Value(amend) => {
+                        if let Some(content) = amend.content {
+                            result = if is_error {
+                                ToolResult::Failure(ToolContent::rich(content))
+                            } else {
+                                ToolResult::Success(ToolContent::rich(content))
+                            };
+                        }
+                        if let Some(err) = amend.is_error {
+                            is_error = err;
+                        }
                     }
                 }
             }
+            session.exts = exts;
         }
-        drain_outbox(outbox, steering_queue, follow_up_queue);
+        session.drain_inject(steering_queue, follow_up_queue);
 
         // tool_exec_end
         events.push(AgentEvent::ToolExecutionEnd {
@@ -473,13 +488,14 @@ async fn execute_tools(
         });
         {
             let args = ToolExecEndArgs { name: call_name, result: &result, is_error };
-            for h in hooks.iter_mut() {
-                let ctx = HookCtx::new(&state.model, &state.system_prompt, outbox, cancel);
-                h.on_tool_exec_end(&args, &ctx);
+            let mut exts = std::mem::take(&mut session.exts);
+            for h in exts.iter_mut() {
+                h.on_tool_exec_end(&args, session);
             }
+            session.exts = exts;
         }
 
-        let tool_content = state.tools[tool_idx].to_result(&result);
+        let tool_content = session.state.tools[tool_idx].to_result(&result);
         tool_result_messages.push(llm::ToolResultMessage {
             tool_call_id: call_id.clone(),
             tool_name: call_name.clone(),
@@ -491,7 +507,7 @@ async fn execute_tools(
 
         // Check steering queue
         if !steering_queue.is_empty() {
-            state.messages.extend(steering_queue.drain(..));
+            session.state.messages.extend(steering_queue.drain(..));
         }
     }
 
@@ -501,19 +517,6 @@ async fn execute_tools(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn drain_outbox(
-    outbox: &mut Vec<(AgentMessage, DeliverAs)>,
-    steering: &mut Vec<AgentMessage>,
-    follow_up: &mut Vec<AgentMessage>,
-) {
-    for (msg, deliver) in outbox.drain(..) {
-        match deliver {
-            DeliverAs::Steer => steering.push(msg),
-            DeliverAs::FollowUp | DeliverAs::NextTurn => follow_up.push(msg),
-        }
-    }
-}
 
 fn make_error_result(
     tool_call_id: refstr::Str,
@@ -566,11 +569,24 @@ fn retry_delay_ms(
 // ---------------------------------------------------------------------------
 
 /// Fires a sync observe hook on all extensions.
+/// Uses mem::take pattern to borrow session mutably.
 macro_rules! fire_observe {
-    ($hooks:expr, $method:ident, $state:expr, $outbox:expr, $cancel:expr) => {
-        for h in $hooks.iter_mut() {
-            let ctx = HookCtx::new(&$state.model, &$state.system_prompt, $outbox, $cancel);
-            h.$method(&ctx);
+    ($session:expr, $method:ident) => {
+        {
+            let mut exts = std::mem::take(&mut $session.exts);
+            for h in exts.iter_mut() {
+                h.$method($session);
+            }
+            $session.exts = exts;
+        }
+    };
+    ($session:expr, $method:ident, $args:expr) => {
+        {
+            let mut exts = std::mem::take(&mut $session.exts);
+            for h in exts.iter_mut() {
+                h.$method($args, $session);
+            }
+            $session.exts = exts;
         }
     };
 }

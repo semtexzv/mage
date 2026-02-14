@@ -13,6 +13,7 @@ use mage_core::agent::AgentBuilder;
 use mage_core::agent_loop::{self, LoopConfig, StreamFn};
 use mage_core::event_stream;
 use mage_core::extension::*;
+use mage_core::session::AgentSession;
 use mage_core::tool::{Tool, ToolExecution, ToolResult};
 use mage_core::types::*;
 
@@ -69,6 +70,27 @@ fn default_convert(messages: &[AgentMessage]) -> Vec<Message> {
         .collect()
 }
 
+/// Create a test session with given stream_fn, extensions, and initial messages.
+fn test_session(
+    stream_fn: StreamFn,
+    exts: Vec<Box<dyn Extension>>,
+    messages: Vec<AgentMessage>,
+) -> AgentSession {
+    let state = AgentState::new(
+        "test",
+        test_model(),
+        messages,
+        StreamOptions::default(),
+    );
+    let config = LoopConfig {
+        max_turns: 10,
+        stream_fn,
+        options: StreamOptions::default(),
+        convert_to_llm: Box::new(default_convert),
+    };
+    AgentSession::from_parts(state, exts, config)
+}
+
 // ===================================================================
 // Basic loop tests
 // ===================================================================
@@ -77,23 +99,15 @@ fn default_convert(messages: &[AgentMessage]) -> Vec<Message> {
 async fn test_basic_text_response() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let mut state = AgentState::new(
-            "You are helpful.",
-            test_model(),
+        let mut session = test_session(
+            text_stream("Hello! How can I help?"),
+            vec![],
             vec![AgentMessage::user_text("Hello")],
-            StreamOptions::default(),
         );
-        let mut hooks: Vec<Box<dyn Extension>> = vec![];
-        let config = LoopConfig {
-            max_turns: 10,
-            stream_fn: text_stream("Hello! How can I help?"),
-            options: StreamOptions::default(),
-            convert_to_llm: Box::new(default_convert),
-        };
-        let (tx, mut rx) = event_stream::new_agent_stream();
-        let cancel = CancelToken::new();
+        session.state.system_prompt = "You are helpful.".into();
 
-        let result = agent_loop::run(&mut state, &mut hooks, &config, &tx, &cancel).await;
+        let (tx, mut rx) = event_stream::new_agent_stream();
+        let result = agent_loop::run(&mut session, &tx).await;
         assert!(result.is_ok(), "loop should succeed: {:?}", result);
 
         // Drop tx so rx.recv() returns None when drained
@@ -108,7 +122,7 @@ async fn test_basic_text_response() {
         assert!(matches!(events.last(), Some(AgentEvent::AgentEnd { .. })));
 
         // Conversation should have 2 messages: user + assistant
-        assert_eq!(state.messages.len(), 2);
+        assert_eq!(session.state.messages.len(), 2);
     }).await;
 }
 
@@ -116,24 +130,15 @@ async fn test_basic_text_response() {
 async fn test_cancellation() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let mut state = AgentState::new(
-            "test",
-            test_model(),
+        let mut session = test_session(
+            text_stream("won't get here"),
+            vec![],
             vec![AgentMessage::user_text("go")],
-            StreamOptions::default(),
         );
-        let mut hooks: Vec<Box<dyn Extension>> = vec![];
-        let config = LoopConfig {
-            max_turns: 0,
-            stream_fn: text_stream("won't get here"),
-            options: StreamOptions::default(),
-            convert_to_llm: Box::new(default_convert),
-        };
-        let (tx, _rx) = event_stream::new_agent_stream();
-        let cancel = CancelToken::new();
-        cancel.cancel();
+        session.cancel.cancel();
 
-        let result = agent_loop::run(&mut state, &mut hooks, &config, &tx, &cancel).await;
+        let (tx, _rx) = event_stream::new_agent_stream();
+        let result = agent_loop::run(&mut session, &tx).await;
         assert!(matches!(result, Err(mage_core::agent_loop::LoopError::Cancelled)));
     }).await;
 }
@@ -169,25 +174,25 @@ impl SharedCounter {
 struct CountingHook(Rc<SharedCounter>);
 
 impl Extension for CountingHook {
-    fn on_agent_start(&mut self, _ctx: &HookCtx) {
+    fn on_agent_start(&mut self, _session: &mut AgentSession) {
         self.0.agent_starts.set(self.0.agent_starts.get() + 1);
     }
-    fn on_agent_end(&mut self, _args: &AgentEndArgs, _ctx: &HookCtx) {
+    fn on_agent_end(&mut self, _args: &AgentEndArgs, _session: &mut AgentSession) {
         self.0.agent_ends.set(self.0.agent_ends.get() + 1);
     }
-    fn on_turn_start(&mut self, _ctx: &HookCtx) {
+    fn on_turn_start(&mut self, _session: &mut AgentSession) {
         self.0.turn_starts.set(self.0.turn_starts.get() + 1);
     }
-    fn on_turn_end(&mut self, _args: &TurnEndArgs, _ctx: &HookCtx) {
+    fn on_turn_end(&mut self, _args: &TurnEndArgs, _session: &mut AgentSession) {
         self.0.turn_ends.set(self.0.turn_ends.get() + 1);
     }
-    fn on_message_start(&mut self, _args: &MessageArgs, _ctx: &HookCtx) {
+    fn on_message_start(&mut self, _args: &MessageArgs, _session: &mut AgentSession) {
         self.0.message_starts.set(self.0.message_starts.get() + 1);
     }
-    fn on_message_end(&mut self, _args: &MessageArgs, _ctx: &HookCtx) {
+    fn on_message_end(&mut self, _args: &MessageArgs, _session: &mut AgentSession) {
         self.0.message_ends.set(self.0.message_ends.get() + 1);
     }
-    fn on_message_delta(&mut self, _args: &MessageDeltaArgs, _ctx: &HookCtx) {
+    fn on_message_delta(&mut self, _args: &MessageDeltaArgs, _session: &mut AgentSession) {
         self.0.message_deltas.set(self.0.message_deltas.get() + 1);
     }
 }
@@ -198,25 +203,14 @@ async fn test_observe_hooks_fire() {
     local.run_until(async {
         let counter = Rc::new(SharedCounter::new());
 
-        let mut state = AgentState::new(
-            "test",
-            test_model(),
+        let mut session = test_session(
+            text_stream("hello"),
+            vec![Box::new(CountingHook(counter.clone()))],
             vec![AgentMessage::user_text("hi")],
-            StreamOptions::default(),
         );
-        let mut hooks: Vec<Box<dyn Extension>> = vec![
-            Box::new(CountingHook(counter.clone())),
-        ];
-        let config = LoopConfig {
-            max_turns: 10,
-            stream_fn: text_stream("hello"),
-            options: StreamOptions::default(),
-            convert_to_llm: Box::new(default_convert),
-        };
-        let (tx, _rx) = event_stream::new_agent_stream();
-        let cancel = CancelToken::new();
 
-        agent_loop::run(&mut state, &mut hooks, &config, &tx, &cancel).await.unwrap();
+        let (tx, _rx) = event_stream::new_agent_stream();
+        agent_loop::run(&mut session, &tx).await.unwrap();
 
         assert_eq!(counter.agent_starts.get(), 1);
         assert_eq!(counter.agent_ends.get(), 1);
@@ -240,7 +234,7 @@ struct OrderTracker {
 }
 
 impl Extension for OrderTracker {
-    fn on_agent_start(&mut self, _ctx: &HookCtx) {
+    fn on_agent_start(&mut self, _session: &mut AgentSession) {
         self.log.borrow_mut().push(self.id);
     }
 }
@@ -251,27 +245,18 @@ async fn test_hook_ordering() {
     local.run_until(async {
         let log = Rc::new(std::cell::RefCell::new(Vec::new()));
 
-        let mut state = AgentState::new(
-            "test",
-            test_model(),
+        let mut session = test_session(
+            text_stream("ok"),
+            vec![
+                Box::new(OrderTracker { id: 1, log: log.clone() }),
+                Box::new(OrderTracker { id: 2, log: log.clone() }),
+                Box::new(OrderTracker { id: 3, log: log.clone() }),
+            ],
             vec![AgentMessage::user_text("hi")],
-            StreamOptions::default(),
         );
-        let mut hooks: Vec<Box<dyn Extension>> = vec![
-            Box::new(OrderTracker { id: 1, log: log.clone() }),
-            Box::new(OrderTracker { id: 2, log: log.clone() }),
-            Box::new(OrderTracker { id: 3, log: log.clone() }),
-        ];
-        let config = LoopConfig {
-            max_turns: 10,
-            stream_fn: text_stream("ok"),
-            options: StreamOptions::default(),
-            convert_to_llm: Box::new(default_convert),
-        };
-        let (tx, _rx) = event_stream::new_agent_stream();
-        let cancel = CancelToken::new();
 
-        agent_loop::run(&mut state, &mut hooks, &config, &tx, &cancel).await.unwrap();
+        let (tx, _rx) = event_stream::new_agent_stream();
+        agent_loop::run(&mut session, &tx).await.unwrap();
 
         let order = log.borrow();
         assert_eq!(*order, vec![1, 2, 3]);
@@ -291,7 +276,7 @@ impl Extension for ToolBlocker {
     fn on_tool_call<'a>(
         &'a mut self,
         args: &'a ToolCallArgs<'a>,
-        _ctx: &'a HookCtx,
+        _session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition> {
         Box::pin(async move {
             if *args.name == *self.blocked_name {
@@ -313,10 +298,12 @@ async fn test_tool_call_blocking() {
             block_count: 0,
         };
 
-        let cancel = CancelToken::new();
-        let model = test_model();
-        let mut outbox = vec![];
-        let ctx = HookCtx::new(&model, "test", &mut outbox, &cancel);
+        // Create a minimal session for hook testing
+        let mut session = test_session(
+            text_stream("unused"),
+            vec![],
+            vec![],
+        );
 
         let args = ToolCallArgs {
             name: "dangerous_tool",
@@ -324,18 +311,16 @@ async fn test_tool_call_blocking() {
             args: &json!({}),
         };
 
-        let result = blocker.on_tool_call(&args, &ctx).await;
+        let result = blocker.on_tool_call(&args, &mut session).await;
         assert!(result.is_block());
         assert_eq!(blocker.block_count, 1);
 
-        let mut outbox2 = vec![];
-        let ctx2 = HookCtx::new(&model, "test", &mut outbox2, &cancel);
         let safe_args = ToolCallArgs {
             name: "safe_tool",
             id: "call_2",
             args: &json!({}),
         };
-        let result2 = blocker.on_tool_call(&safe_args, &ctx2).await;
+        let result2 = blocker.on_tool_call(&safe_args, &mut session).await;
         assert!(matches!(result2, Disposition::Propagate));
         assert_eq!(blocker.block_count, 1);
     }).await;
@@ -353,8 +338,6 @@ impl Tool for EchoTool {
     fn name(&self) -> &str { "echo" }
     fn description(&self) -> &str { "Echoes input" }
     fn parameters(&self) -> &serde_json::Value {
-        // Return a static ref via lazy; or just leak. For tests, a const works.
-        // Use a thread_local or Box::leak for the static ref.
         static PARAMS: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
             json!({"type": "object", "properties": {"text": {"type": "string"}}})
         });
@@ -406,7 +389,7 @@ impl Extension for ContextInjector {
     fn on_context<'a>(
         &'a mut self,
         messages: &'a [AgentMessage],
-        _ctx: &'a HookCtx,
+        _session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<ContextAmend>> {
         Box::pin(async move {
             let mut new_messages = messages.to_vec();
@@ -442,25 +425,14 @@ async fn test_context_amendment() {
             }
         });
 
-        let mut state = AgentState::new(
-            "test",
-            test_model(),
-            vec![AgentMessage::user_text("original")],
-            StreamOptions::default(),
-        );
-        let mut hooks: Vec<Box<dyn Extension>> = vec![
-            Box::new(ContextInjector),
-        ];
-        let config = LoopConfig {
-            max_turns: 10,
+        let mut session = test_session(
             stream_fn,
-            options: StreamOptions::default(),
-            convert_to_llm: Box::new(default_convert),
-        };
-        let (tx, _rx) = event_stream::new_agent_stream();
-        let cancel = CancelToken::new();
+            vec![Box::new(ContextInjector)],
+            vec![AgentMessage::user_text("original")],
+        );
 
-        agent_loop::run(&mut state, &mut hooks, &config, &tx, &cancel).await.unwrap();
+        let (tx, _rx) = event_stream::new_agent_stream();
+        agent_loop::run(&mut session, &tx).await.unwrap();
 
         let msgs = received.borrow();
         assert_eq!(msgs.len(), 1);
@@ -479,7 +451,7 @@ impl Extension for ResultAmender {
     fn on_tool_result<'a>(
         &'a mut self,
         _args: &'a ToolResultArgs<'a>,
-        _ctx: &'a HookCtx,
+        _session: &'a mut AgentSession,
     ) -> HookFuture<'a, Disposition<ToolResultAmend>> {
         Box::pin(async move {
             Disposition::Value(ToolResultAmend {
@@ -495,10 +467,13 @@ impl Extension for ResultAmender {
 #[tokio::test]
 async fn test_tool_result_amendment() {
     let mut amender = ResultAmender;
-    let cancel = CancelToken::new();
-    let model = test_model();
-    let mut outbox = vec![];
-    let ctx = HookCtx::new(&model, "test", &mut outbox, &cancel);
+
+    // Create a minimal session for hook testing
+    let mut session = test_session(
+        text_stream("unused"),
+        vec![],
+        vec![],
+    );
 
     let original = ToolResult::success("original");
 
@@ -509,7 +484,7 @@ async fn test_tool_result_amendment() {
         is_error: false,
     };
 
-    match amender.on_tool_result(&args, &ctx).await {
+    match amender.on_tool_result(&args, &mut session).await {
         Disposition::Value(amend) => {
             let content = amend.content.unwrap();
             assert_eq!(content.len(), 1);
@@ -531,16 +506,16 @@ async fn test_tool_result_amendment() {
 async fn test_agent_builder() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let mut agent = AgentBuilder::new(test_model())
+        let mut session = AgentBuilder::new(test_model())
             .system_prompt("You are helpful.")
             .stream_fn(text_stream("I'm here to help!"))
             .max_turns(5)
             .build();
 
-        let rx = agent.prompt("Hello").await;
+        let rx = session.prompt("Hello").await;
         assert!(rx.is_ok());
 
-        assert_eq!(agent.messages().len(), 2); // user + assistant
+        assert_eq!(session.messages().len(), 2); // user + assistant
     }).await;
 }
 
@@ -554,14 +529,14 @@ async fn test_agent_builder_with_hook() {
     local.run_until(async {
         let counter = Rc::new(SharedCounter::new());
 
-        let mut agent = AgentBuilder::new(test_model())
+        let mut session = AgentBuilder::new(test_model())
             .system_prompt("test")
             .stream_fn(text_stream("response"))
             .ext(CountingHook(counter.clone()))
             .max_turns(5)
             .build();
 
-        agent.prompt("go").await.unwrap();
+        session.prompt("go").await.unwrap();
 
         assert_eq!(counter.agent_starts.get(), 1);
         assert_eq!(counter.agent_ends.get(), 1);
@@ -571,48 +546,42 @@ async fn test_agent_builder_with_hook() {
 }
 
 // ===================================================================
-// HookCtx reads
+// Session handle
 // ===================================================================
 
 #[tokio::test]
-async fn test_hook_ctx_reads() {
-    let cancel = CancelToken::new();
-    let model = test_model();
-    let mut outbox = vec![];
-    let ctx = HookCtx::new(&model, "my system prompt", &mut outbox, &cancel);
+async fn test_session_handle() {
+    let session = test_session(
+        text_stream("unused"),
+        vec![],
+        vec![],
+    );
 
-    assert_eq!(ctx.system_prompt, "my system prompt");
-    assert_eq!(&*ctx.model.id, "test-model");
-    assert!(!ctx.is_cancelled());
+    let handle = session.handle();
+
+    assert!(handle.is_idle());
+    assert!(!session.cancel.is_cancelled());
+
+    handle.abort();
+    assert!(session.cancel.is_cancelled());
 }
 
 #[tokio::test]
-async fn test_hook_ctx_cancel() {
-    let cancel = CancelToken::new();
-    let model = test_model();
-    let mut outbox = vec![];
-    let ctx = HookCtx::new(&model, "test", &mut outbox, &cancel);
+async fn test_session_handle_inject() {
+    let session = test_session(
+        text_stream("unused"),
+        vec![],
+        vec![],
+    );
 
-    assert!(!ctx.is_cancelled());
-    ctx.abort();
-    assert!(ctx.is_cancelled());
-}
+    let handle = session.handle();
+    handle.inject(AgentMessage::user_text("injected"), DeliverAs::FollowUp);
+    handle.inject(AgentMessage::user_text("steering"), DeliverAs::Steer);
 
-#[tokio::test]
-async fn test_hook_ctx_send_message() {
-    let cancel = CancelToken::new();
-    let model = test_model();
-    let mut outbox = vec![];
-
-    {
-        let mut ctx = HookCtx::new(&model, "test", &mut outbox, &cancel);
-        ctx.send_message(AgentMessage::user_text("injected"), DeliverAs::FollowUp);
-        ctx.send_message(AgentMessage::user_text("steering"), DeliverAs::Steer);
-    }
-
-    assert_eq!(outbox.len(), 2);
-    assert!(matches!(outbox[0].1, DeliverAs::FollowUp));
-    assert!(matches!(outbox[1].1, DeliverAs::Steer));
+    let queue = session.inject.borrow();
+    assert_eq!(queue.len(), 2);
+    assert!(matches!(queue[0].1, DeliverAs::FollowUp));
+    assert!(matches!(queue[1].1, DeliverAs::Steer));
 }
 
 // ===================================================================
@@ -687,29 +656,18 @@ impl Extension for ToolRegisteringExt {
 async fn test_extension_registers_tool_via_init() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let mut state = AgentState::new(
-            "test",
-            test_model(),
+        let mut session = test_session(
+            text_stream("ok"),
+            vec![Box::new(ToolRegisteringExt)],
             vec![AgentMessage::user_text("hi")],
-            StreamOptions::default(),
         );
-        let mut exts: Vec<Box<dyn Extension>> = vec![
-            Box::new(ToolRegisteringExt),
-        ];
-        let config = LoopConfig {
-            max_turns: 10,
-            stream_fn: text_stream("ok"),
-            options: StreamOptions::default(),
-            convert_to_llm: Box::new(default_convert),
-        };
-        let (tx, _rx) = event_stream::new_agent_stream();
-        let cancel = CancelToken::new();
 
-        agent_loop::run(&mut state, &mut exts, &config, &tx, &cancel).await.unwrap();
+        let (tx, _rx) = event_stream::new_agent_stream();
+        agent_loop::run(&mut session, &tx).await.unwrap();
 
         // After init, the extension should have registered the "greet" tool
-        assert_eq!(state.llm_tools().len(), 1);
-        assert_eq!(&*state.llm_tools()[0].name, "greet");
+        assert_eq!(session.state.llm_tools().len(), 1);
+        assert_eq!(&*session.state.llm_tools()[0].name, "greet");
     }).await;
 }
 
@@ -810,25 +768,14 @@ fn tool_use_then_text_stream() -> StreamFn {
 async fn test_tool_execution_through_loop() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let mut state = AgentState::new(
-            "test",
-            test_model(),
+        let mut session = test_session(
+            tool_use_then_text_stream(),
+            vec![Box::new(EchoToolExt)],
             vec![AgentMessage::user_text("ping")],
-            StreamOptions::default(),
         );
-        let mut hooks: Vec<Box<dyn Extension>> = vec![
-            Box::new(EchoToolExt),
-        ];
-        let config = LoopConfig {
-            max_turns: 10,
-            stream_fn: tool_use_then_text_stream(),
-            options: StreamOptions::default(),
-            convert_to_llm: Box::new(default_convert),
-        };
-        let (tx, mut rx) = event_stream::new_agent_stream();
-        let cancel = CancelToken::new();
 
-        let result = agent_loop::run(&mut state, &mut hooks, &config, &tx, &cancel).await;
+        let (tx, mut rx) = event_stream::new_agent_stream();
+        let result = agent_loop::run(&mut session, &tx).await;
         assert!(result.is_ok(), "loop should succeed: {:?}", result);
 
         drop(tx);
@@ -846,12 +793,12 @@ async fn test_tool_execution_through_loop() {
         assert!(has_tool_exec_end, "should have ToolExecutionEnd event");
 
         // Conversation should have: user + assistant(tool_call) + tool_result + assistant(text)
-        assert_eq!(state.messages.len(), 4,
+        assert_eq!(session.state.messages.len(), 4,
             "expected 4 messages (user, assistant+tool_call, tool_result, assistant+text), got {}\n{:?}",
-            state.messages.len(), state.messages.iter().map(|m| m.role()).collect::<Vec<_>>());
+            session.state.messages.len(), session.state.messages.iter().map(|m| m.role()).collect::<Vec<_>>());
 
         // Verify the tool result message content
-        match &state.messages[2] {
+        match &session.state.messages[2] {
             AgentMessage::Llm(Message::ToolResult(tr)) => {
                 assert_eq!(&*tr.tool_name, "echo");
                 assert!(!tr.is_error);
@@ -950,33 +897,24 @@ async fn test_tool_blocked_through_loop() {
             })
         };
 
-        let mut state = AgentState::new(
-            "test",
-            test_model(),
-            vec![AgentMessage::user_text("do dangerous thing")],
-            StreamOptions::default(),
-        );
-        let mut hooks: Vec<Box<dyn Extension>> = vec![
-            Box::new(DangerousToolExt),
-            Box::new(ToolBlocker {
-                blocked_name: "dangerous".into(),
-                block_count: 0,
-            }),
-        ];
-        let config = LoopConfig {
-            max_turns: 10,
+        let mut session = test_session(
             stream_fn,
-            options: StreamOptions::default(),
-            convert_to_llm: Box::new(default_convert),
-        };
-        let (tx, _rx) = event_stream::new_agent_stream();
-        let cancel = CancelToken::new();
+            vec![
+                Box::new(DangerousToolExt),
+                Box::new(ToolBlocker {
+                    blocked_name: "dangerous".into(),
+                    block_count: 0,
+                }),
+            ],
+            vec![AgentMessage::user_text("do dangerous thing")],
+        );
 
-        let result = agent_loop::run(&mut state, &mut hooks, &config, &tx, &cancel).await;
+        let (tx, _rx) = event_stream::new_agent_stream();
+        let result = agent_loop::run(&mut session, &tx).await;
         assert!(result.is_ok(), "loop should succeed even with blocked tool: {:?}", result);
 
         // Tool result should be an error from the block
-        let tool_results: Vec<_> = state.messages.iter().filter_map(|m| match m {
+        let tool_results: Vec<_> = session.state.messages.iter().filter_map(|m| match m {
             AgentMessage::Llm(Message::ToolResult(tr)) => Some(tr),
             _ => None,
         }).collect();
@@ -1018,15 +956,15 @@ impl llm::Provider for TestProvider {
 async fn test_agent_builder_with_provider() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async {
-        let mut agent = AgentBuilder::new(test_model())
+        let mut session = AgentBuilder::new(test_model())
             .system_prompt("You are helpful.")
             .provider("test", TestProvider { response_text: "Hello from provider!".into() })
             .max_turns(5)
             .build();
 
-        let rx = agent.prompt("Hello").await;
+        let rx = session.prompt("Hello").await;
         assert!(rx.is_ok(), "should succeed with provider: {:?}", rx.as_ref().err());
-        assert_eq!(agent.messages().len(), 2); // user + assistant
+        assert_eq!(session.messages().len(), 2); // user + assistant
     }).await;
 }
 
@@ -1051,19 +989,19 @@ async fn test_factory_registry() {
         assert_eq!(factory_reg.len(), 1);
         assert!(!factory_reg.is_empty());
 
-        let mut agent = AgentBuilder::new(test_model())
+        let mut session = AgentBuilder::new(test_model())
             .system_prompt("test")
             .stream_fn(text_stream("hello"))
             .ext_from_registry(&factory_reg)
             .max_turns(5)
             .build();
 
-        agent.prompt("go").await.unwrap();
+        session.prompt("go").await.unwrap();
 
         assert_eq!(counter.agent_starts.get(), 1);
         assert_eq!(counter.agent_ends.get(), 1);
 
-        // Create a second agent from the same registry — gets fresh instances
+        // Create a second session from a separate registry — gets fresh instances
         let counter2 = Rc::new(SharedCounter::new());
         let counter2_for_factory = counter2.clone();
 
@@ -1072,17 +1010,17 @@ async fn test_factory_registry() {
             Box::new(CountingHook(counter2_for_factory.clone())) as Box<dyn Extension>
         });
 
-        let mut agent2 = AgentBuilder::new(test_model())
+        let mut session2 = AgentBuilder::new(test_model())
             .system_prompt("test")
             .stream_fn(text_stream("world"))
             .ext_from_registry(&factory_reg2)
             .max_turns(5)
             .build();
 
-        agent2.prompt("go").await.unwrap();
+        session2.prompt("go").await.unwrap();
 
-        // Each agent got its own extension instance
-        assert_eq!(counter.agent_starts.get(), 1);  // unchanged from first agent
-        assert_eq!(counter2.agent_starts.get(), 1); // second agent's counter
+        // Each session got its own extension instance
+        assert_eq!(counter.agent_starts.get(), 1);  // unchanged from first session
+        assert_eq!(counter2.agent_starts.get(), 1); // second session's counter
     }).await;
 }

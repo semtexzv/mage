@@ -1,10 +1,10 @@
-//! Agent — owns state + extensions, provides the public API.
+//! Agent construction — builder and init recipe for creating sessions.
 //!
 //! ## Construction
 //!
 //! Use [`AgentBuilder`] to configure, then either:
-//! - `.build()` for a single agent (convenience)
-//! - `.into_init()` for a clonable [`AgentInit`] recipe, then `.spawn()` per agent
+//! - `.build()` for a single session (convenience)
+//! - `.into_init()` for a clonable [`AgentInit`] recipe, then `.spawn()` per session
 //!
 //! ```ignore
 //! let init = AgentBuilder::new(model)
@@ -13,81 +13,27 @@
 //!     .ext_factory(|| Box::new(MyExtension::new()))
 //!     .into_init();
 //!
-//! let mut agent = init.spawn();       // main agent
-//! let mut sub   = init.spawn();       // sub-agent: fresh extensions, empty history
+//! let mut session = init.spawn();       // main session
+//! let mut sub     = init.spawn();       // sub-agent: fresh extensions, empty history
 //! ```
 
 use std::rc::Rc;
 
 use refstr::Str;
-use llm::{CancelToken, Message, Model, Provider, StreamOptions};
+use llm::{Message, Model, Provider, StreamOptions};
 
-use crate::agent_loop::{self, LoopConfig, LoopError, StreamFn};
-use crate::event_stream::{self, AgentEventReceiver};
+use crate::agent_loop::{LoopConfig, StreamFn};
 use crate::extension::{Extension, ExtensionFactory};
+use crate::session::AgentSession;
 use crate::types::{AgentMessage, AgentState};
 
 // ---------------------------------------------------------------------------
-// Agent
+// AgentInit — clonable recipe for spawning sessions
 // ---------------------------------------------------------------------------
 
-pub struct Agent {
-    state: AgentState,
-    exts: Vec<Box<dyn Extension>>,
-    config: LoopConfig,
-    cancel: CancelToken,
-}
-
-impl Agent {
-    /// Run the agent with the given user prompt.
-    /// Returns the event receiver — the caller reads events from it.
-    /// The loop runs inline (call from within a `spawn_local` or `block_on`).
-    pub async fn prompt(&mut self, text: &str) -> Result<AgentEventReceiver, LoopError> {
-        self.state.messages.push(AgentMessage::user_text(text));
-        self.cancel = CancelToken::new();
-
-        let (tx, rx) = event_stream::new_agent_stream();
-
-        agent_loop::run(
-            &mut self.state,
-            &mut self.exts,
-            &self.config,
-            &tx,
-            &self.cancel,
-        )
-        .await?;
-
-        Ok(rx)
-    }
-
-    /// Cancel the current operation.
-    pub fn abort(&self) {
-        self.cancel.cancel();
-    }
-
-    /// Inject a steering message (interrupts current tool execution).
-    pub fn steer(&mut self, text: &str) {
-        self.state.messages.push(AgentMessage::user_text(text));
-    }
-
-    /// Access the conversation history.
-    pub fn messages(&self) -> &[AgentMessage] {
-        &self.state.messages
-    }
-
-    /// Access the model.
-    pub fn model(&self) -> &Model {
-        &self.state.model
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AgentInit — clonable recipe for spawning agents
-// ---------------------------------------------------------------------------
-
-/// Clonable recipe for spawning agents. Cheap to clone (Rc internals).
+/// Clonable recipe for spawning sessions. Cheap to clone (Rc internals).
 ///
-/// Each [`spawn()`] call produces a fresh `Agent` with:
+/// Each [`spawn()`] call produces a fresh `AgentSession` with:
 /// - Fresh extension instances (from factories)
 /// - Empty message history
 /// - Own cancel token
@@ -102,7 +48,7 @@ pub struct AgentInit {
     pub system_prompt: String,
     pub options: StreamOptions,
     pub max_turns: u32,
-    /// Providers shared across all agents spawned from this init.
+    /// Providers shared across all sessions spawned from this init.
     /// `Rc<dyn Provider>` because providers are stateless (HTTP client + key).
     providers: Rc<Vec<(Str, Rc<dyn Provider>)>>,
     /// Extension factories — called per spawn to get fresh instances.
@@ -117,11 +63,11 @@ pub struct AgentInit {
 type StreamFnShared = dyn Fn(llm::StreamRequest) -> llm::StreamHandle;
 
 impl AgentInit {
-    /// Spawn a fresh agent. Fresh extensions, empty history, own cancel token.
+    /// Spawn a fresh session. Fresh extensions, empty history, own cancel token.
     ///
     /// Tools and extension-provided providers are registered later when
     /// `Extension::init()` runs inside the agent loop.
-    pub fn spawn(&self) -> Agent {
+    pub fn spawn(&self) -> AgentSession {
         let exts: Vec<Box<dyn Extension>> =
             self.ext_factories.iter().map(|f| f()).collect();
 
@@ -131,27 +77,26 @@ impl AgentInit {
         let convert_to_llm: Box<dyn Fn(&[AgentMessage]) -> Vec<Message>> =
             Box::new(move |msgs| convert_rc(msgs));
 
-        Agent {
-            state: AgentState {
-                system_prompt: self.system_prompt.clone(),
-                model: self.model.clone(),
-                messages: Vec::new(),
-                tools: Vec::new(), // populated by Extension::init in the loop
-                options: self.options.clone(),
-            },
-            exts,
-            config: LoopConfig {
-                max_turns: self.max_turns,
-                stream_fn,
-                options: self.options.clone(),
-                convert_to_llm,
-            },
-            cancel: CancelToken::new(),
-        }
+        let state = AgentState {
+            system_prompt: self.system_prompt.clone(),
+            model: self.model.clone(),
+            messages: Vec::new(),
+            tools: Vec::new(), // populated by Extension::init in the loop
+            options: self.options.clone(),
+        };
+
+        let config = LoopConfig {
+            max_turns: self.max_turns,
+            stream_fn,
+            options: self.options.clone(),
+            convert_to_llm,
+        };
+
+        AgentSession::from_parts(state, exts, config)
     }
 
     /// Spawn with overrides applied to a clone of this init.
-    pub fn spawn_with(&self, f: impl FnOnce(&mut AgentInit)) -> Agent {
+    pub fn spawn_with(&self, f: impl FnOnce(&mut AgentInit)) -> AgentSession {
         let mut init = self.clone();
         f(&mut init);
         init.spawn()
@@ -224,7 +169,7 @@ impl AgentBuilder {
     }
 
     /// Register a provider. Stored as `Rc<dyn Provider>` — shared across
-    /// all agents spawned from the same `AgentInit`.
+    /// all sessions spawned from the same `AgentInit`.
     pub fn provider(mut self, api: impl Into<Str>, provider: impl Provider + 'static) -> Self {
         self.providers.push((api.into(), Rc::new(provider)));
         self
@@ -239,7 +184,7 @@ impl AgentBuilder {
 
     /// Add an already-constructed extension instance.
     ///
-    /// This instance is consumed by the first agent. For sub-agent support,
+    /// This instance is consumed by the first session. For sub-agent support,
     /// use `.ext_factory()` instead — it creates fresh instances per spawn.
     pub fn ext(mut self, ext: impl Extension + 'static) -> Self {
         self.exts.push(Box::new(ext));
@@ -316,8 +261,8 @@ impl AgentBuilder {
         }
     }
 
-    /// Convenience: build and spawn a single agent in one step.
-    pub fn build(self) -> Agent {
+    /// Convenience: build and spawn a single session in one step.
+    pub fn build(self) -> AgentSession {
         self.into_init().spawn()
     }
 }
