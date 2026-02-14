@@ -820,6 +820,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mage"
+version = "0.1.0"
+dependencies = [
+ "mage-build",
+ "mage-core",
+ "mage-llm",
+ "mage-tui",
+ "refstr",
+]
+
+[[package]]
 name = "mage-anthropic"
 version = "0.1.0"
 dependencies = [

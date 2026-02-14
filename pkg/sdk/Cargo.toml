@@ -1,0 +1,12 @@
+[package]
+name = "mage"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mage-core = { path = "../core" }
+mage-llm = { path = "../llm" }
+mage-tui = { path = "../tui" }
+mage-build = { path = "../build" }
+refstr = { path = "../refstr" }

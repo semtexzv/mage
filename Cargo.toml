@@ -7,6 +7,7 @@ members = [
     "pkg/tui",
     "pkg/build",
     "providers/anthropic",
+    "pkg/sdk",
 ]
 
 [workspace.package]
