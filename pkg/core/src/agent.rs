@@ -19,7 +19,7 @@
 
 use std::rc::Rc;
 
-use refstr::LocalStr;
+use refstr::Str;
 use llm::{CancelToken, Message, Model, Provider, StreamOptions};
 
 use crate::agent_loop::{self, LoopConfig, LoopError, StreamFn};
@@ -104,7 +104,7 @@ pub struct AgentInit {
     pub max_turns: u32,
     /// Providers shared across all agents spawned from this init.
     /// `Rc<dyn Provider>` because providers are stateless (HTTP client + key).
-    providers: Rc<Vec<(LocalStr, Rc<dyn Provider>)>>,
+    providers: Rc<Vec<(Str, Rc<dyn Provider>)>>,
     /// Extension factories — called per spawn to get fresh instances.
     ext_factories: Rc<Vec<ExtensionFactory>>,
     /// Custom stream function override. If set, bypasses provider resolution.
@@ -194,7 +194,7 @@ impl AgentInit {
 pub struct AgentBuilder {
     system_prompt: String,
     model: Model,
-    providers: Vec<(LocalStr, Rc<dyn Provider>)>,
+    providers: Vec<(Str, Rc<dyn Provider>)>,
     stream_fn: Option<StreamFn>,
     exts: Vec<Box<dyn Extension>>,
     ext_factories: Vec<ExtensionFactory>,
@@ -225,7 +225,7 @@ impl AgentBuilder {
 
     /// Register a provider. Stored as `Rc<dyn Provider>` — shared across
     /// all agents spawned from the same `AgentInit`.
-    pub fn provider(mut self, api: impl Into<LocalStr>, provider: impl Provider + 'static) -> Self {
+    pub fn provider(mut self, api: impl Into<Str>, provider: impl Provider + 'static) -> Self {
         self.providers.push((api.into(), Rc::new(provider)));
         self
     }

@@ -2,7 +2,7 @@ use anthropic::api_types::{ContentBlockParam, MessageContent};
 use anthropic::convert::build_request_body;
 use anthropic::oauth;
 use llm::*;
-use refstr::LocalStr;
+use refstr::Str;
 use serde_json::json;
 
 fn test_model() -> Model {
@@ -264,9 +264,9 @@ fn oauth_mode_remaps_tool_names_in_assistant_messages() {
                         thought_signature: None,
                     },
                 ],
-                api: LocalStr::new(),
-                provider: LocalStr::new(),
-                model: LocalStr::new(),
+                api: Str::new(),
+                provider: Str::new(),
+                model: Str::new(),
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
                 error_message: None,

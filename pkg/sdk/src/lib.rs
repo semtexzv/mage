@@ -46,7 +46,7 @@ pub use mage_core::event_stream;
 /// LLM abstraction: Provider trait, Message, Model, CancelToken, events.
 pub use llm;
 
-/// Ref-counted strings: LocalStr, AtomicStr, Str<M>.
+/// Ref-counted strings: Str, Str<Atomic>, Local, Atomic, Mode.
 pub use refstr;
 
 /// Terminal UI: renderer, markdown, editor, keymap, styles.
@@ -83,5 +83,5 @@ pub mod prelude {
     };
 
     // Strings
-    pub use refstr::LocalStr;
+    pub use refstr::Str;
 }

@@ -8,15 +8,7 @@ use std::ops::Deref;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// --- Public Types -----------------------------------------------------------
-
-/// Single-threaded reference-counted string. Cheap clone (refcount bump).
-/// Use when all access is on one thread (agent loop, session manager, etc.).
-pub type LocalStr = Str<Local>;
-
-/// Thread-safe reference-counted string. Cheap clone (atomic refcount bump).
-/// Use when the string crosses thread boundaries (rare in this codebase).
-pub type AtomicStr = Str<Atomic>;
+// --- The Core Type ----------------------------------------------------------
 
 // --- The Core Type ----------------------------------------------------------
 
@@ -29,7 +21,7 @@ pub type AtomicStr = Str<Atomic>;
 /// - Equality checks pointer first (O(1) fast path for clones).
 /// - Implements `Borrow<str>` so `HashMap<Str<M>, V>` supports `&str` lookup.
 /// - Writable via `fmt::Write` when refcount == 1.
-pub struct Str<M: Mode> {
+pub struct Str<M: Mode = Local> {
     ptr: NonNull<u8>,
     len: usize,
     _marker: PhantomData<M>,
@@ -373,7 +365,7 @@ mod tests {
 
     #[test]
     fn basic_local() {
-        let s: LocalStr = "hello".into();
+        let s: Str = "hello".into();
         assert_eq!(&*s, "hello");
         assert_eq!(s.len(), 5);
         assert_eq!(s.ref_count(), 1);
@@ -381,7 +373,7 @@ mod tests {
 
     #[test]
     fn clone_shares() {
-        let a: LocalStr = "world".into();
+        let a: Str = "world".into();
         let b = a.clone();
         assert!(a.ptr_eq(&b));
         assert_eq!(a.ref_count(), 2);
@@ -390,7 +382,7 @@ mod tests {
 
     #[test]
     fn drop_frees() {
-        let a: LocalStr = "test".into();
+        let a: Str = "test".into();
         let b = a.clone();
         assert_eq!(a.ref_count(), 2);
         drop(b);
@@ -399,7 +391,7 @@ mod tests {
 
     #[test]
     fn push_str_works() {
-        let mut s: LocalStr = LocalStr::with_capacity(16);
+        let mut s: Str = Str::with_capacity(16);
         s.push_str("hello");
         s.push_str(" world");
         assert_eq!(&*s, "hello world");
@@ -408,23 +400,23 @@ mod tests {
     #[test]
     #[should_panic(expected = "Cannot mutate shared Str")]
     fn push_str_panics_if_shared() {
-        let mut a: LocalStr = "hello".into();
+        let mut a: Str = "hello".into();
         let _b = a.clone();
         a.push_str(" world");
     }
 
     #[test]
     fn hashmap_lookup_with_str() {
-        let mut map: HashMap<LocalStr, u32> = HashMap::new();
-        let key: LocalStr = "hello".into();
+        let mut map: HashMap<Str, u32> = HashMap::new();
+        let key: Str = "hello".into();
         map.insert(key, 42);
         assert_eq!(map.get("hello"), Some(&42));
     }
 
     #[test]
     fn equality() {
-        let a: LocalStr = "hello".into();
-        let b: LocalStr = "hello".into();
+        let a: Str = "hello".into();
+        let b: Str = "hello".into();
         let c = a.clone();
 
         // Different allocations, same content
@@ -441,7 +433,7 @@ mod tests {
 
     #[test]
     fn atomic_basic() {
-        let a: AtomicStr = "threadsafe".into();
+        let a: Str<Atomic> = "threadsafe".into();
         let b = a.clone();
         assert!(a.ptr_eq(&b));
         assert_eq!(&*a, "threadsafe");
@@ -449,7 +441,7 @@ mod tests {
 
     #[test]
     fn grow_realloc() {
-        let mut s: LocalStr = LocalStr::with_capacity(2);
+        let mut s: Str = Str::with_capacity(2);
         s.push_str("this is a much longer string that forces reallocation");
         assert_eq!(&*s, "this is a much longer string that forces reallocation");
     }
@@ -457,10 +449,10 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn serde_roundtrip() {
-        let original: LocalStr = "serde test".into();
+        let original: Str = "serde test".into();
         let json = serde_json::to_string(&original).unwrap();
         assert_eq!(json, "\"serde test\"");
-        let deserialized: LocalStr = serde_json::from_str(&json).unwrap();
+        let deserialized: Str = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
     }
 }

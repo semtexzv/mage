@@ -8,6 +8,7 @@ members = [
     "pkg/build",
     "providers/anthropic",
     "pkg/sdk",
+    "xtask",
 ]
 
 [workspace.package]

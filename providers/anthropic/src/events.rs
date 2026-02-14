@@ -1,6 +1,6 @@
 //! Map Anthropic SSE events to `llm::AssistantMessageEvent`.
 
-use refstr::LocalStr;
+use refstr::Str;
 use serde::Deserialize;
 use llm::{AssistantMessageEvent, StopReason, Usage};
 
@@ -183,8 +183,8 @@ impl EventMapper {
                 self.tool_json[content_index] = Some(JsonAccumulator::new());
                 vec![AssistantMessageEvent::ToolCallStart {
                     content_index,
-                    id: LocalStr::from(id.as_str()),
-                    name: LocalStr::from(name.as_str()),
+                    id: Str::from(id.as_str()),
+                    name: Str::from(name.as_str()),
                 }]
             }
         }
@@ -200,13 +200,13 @@ impl EventMapper {
             ContentBlockDelta::TextDelta { text } => {
                 vec![AssistantMessageEvent::TextDelta {
                     content_index,
-                    delta: LocalStr::from(text.as_str()),
+                    delta: Str::from(text.as_str()),
                 }]
             }
             ContentBlockDelta::ThinkingDelta { thinking } => {
                 vec![AssistantMessageEvent::ThinkingDelta {
                     content_index,
-                    delta: LocalStr::from(thinking.as_str()),
+                    delta: Str::from(thinking.as_str()),
                 }]
             }
             ContentBlockDelta::InputJsonDelta { partial_json } => {
@@ -216,7 +216,7 @@ impl EventMapper {
                 }
                 vec![AssistantMessageEvent::ToolCallDelta {
                     content_index,
-                    delta: LocalStr::from(partial_json.as_str()),
+                    delta: Str::from(partial_json.as_str()),
                 }]
             }
             ContentBlockDelta::SignatureDelta { signature } => {
@@ -251,7 +251,7 @@ impl EventMapper {
         if block_type == BlockType::Thinking {
             let signature = self.signatures.get(content_index)
                 .filter(|s| !s.is_empty())
-                .map(|s| LocalStr::from(s.as_str()));
+                .map(|s| Str::from(s.as_str()));
             return vec![AssistantMessageEvent::ThinkingEnd { content_index, signature }];
         }
         vec![AssistantMessageEvent::TextEnd { content_index }]
@@ -285,7 +285,7 @@ impl EventMapper {
 
         vec![AssistantMessageEvent::Error {
             reason: StopReason::Error,
-            error: message.map(|m| LocalStr::from(m.as_str())),
+            error: message.map(|m| Str::from(m.as_str())),
         }]
     }
 }

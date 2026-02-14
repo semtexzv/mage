@@ -25,7 +25,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use refstr::LocalStr;
+use refstr::Str;
 
 use llm::{AssistantMessageEvent, CancelToken, Model, ToolResultMessage, UserContent};
 
@@ -41,7 +41,7 @@ pub enum Disposition<T = ()> {
     /// No opinion. Continue to next hook.
     Propagate,
     /// Block the operation.
-    Block { reason: LocalStr },
+    Block { reason: Str },
     /// Return a value (amendment).
     Value(T),
 }
@@ -83,8 +83,8 @@ pub struct ContextAmend {
 }
 
 pub struct CompactAmend {
-    pub summary: LocalStr,
-    pub first_kept_entry_id: LocalStr,
+    pub summary: Str,
+    pub first_kept_entry_id: Str,
 }
 
 pub struct BashAmend {
@@ -203,7 +203,7 @@ impl<'a> HookCtx<'a> {
 /// register tools and providers into the agent.
 pub struct Registry<'a> {
     pub(crate) tools: &'a mut Vec<Box<dyn ErasedTool>>,
-    pub(crate) providers: &'a mut Vec<(LocalStr, std::rc::Rc<dyn llm::Provider>)>,
+    pub(crate) providers: &'a mut Vec<(Str, std::rc::Rc<dyn llm::Provider>)>,
 }
 impl<'a> Registry<'a> {
     /// Register a tool. Wraps the concrete `Tool` impl into type-erased storage.
@@ -212,7 +212,7 @@ impl<'a> Registry<'a> {
     }
     /// Register a provider under an API name (e.g. `"anthropic"`).
     /// The agent resolves the provider from `model.api`.
-    pub fn provider(&mut self, api: impl Into<LocalStr>, provider: impl llm::Provider + 'static) {
+    pub fn provider(&mut self, api: impl Into<Str>, provider: impl llm::Provider + 'static) {
         self.providers.push((api.into(), std::rc::Rc::new(provider)));
     }
 }

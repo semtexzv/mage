@@ -1,4 +1,4 @@
-use refstr::LocalStr;
+use refstr::Str;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -63,21 +63,21 @@ pub enum ContentBlock {
     Text {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        text_signature: Option<LocalStr>,
+        text_signature: Option<Str>,
     },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        thinking_signature: Option<LocalStr>,
+        thinking_signature: Option<Str>,
     },
     #[serde(rename = "toolCall")]
     ToolCall {
-        id: LocalStr,
-        name: LocalStr,
+        id: Str,
+        name: Str,
         arguments: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
-        thought_signature: Option<LocalStr>,
+        thought_signature: Option<Str>,
     },
 }
 
@@ -87,7 +87,7 @@ pub enum UserContent {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "image")]
-    Image { data: String, mime_type: LocalStr },
+    Image { data: String, mime_type: Str },
 }
 
 // ---------------------------------------------------------------------------
@@ -112,21 +112,21 @@ pub struct UserMessage {
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMessage {
     pub content: Vec<ContentBlock>,
-    pub api: LocalStr,
-    pub provider: LocalStr,
-    pub model: LocalStr,
+    pub api: Str,
+    pub provider: Str,
+    pub model: Str,
     pub usage: Usage,
     pub stop_reason: StopReason,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<LocalStr>,
+    pub error_message: Option<Str>,
     pub timestamp: u64,
 }
 
 impl AssistantMessage {
     pub fn empty(
-        api: LocalStr,
-        provider: LocalStr,
-        model: LocalStr,
+        api: Str,
+        provider: Str,
+        model: Str,
         stop_reason: StopReason,
     ) -> Self {
         Self {
@@ -145,8 +145,8 @@ impl AssistantMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolResultMessage {
-    pub tool_call_id: LocalStr,
-    pub tool_name: LocalStr,
+    pub tool_call_id: Str,
+    pub tool_name: Str,
     pub content: Vec<UserContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
@@ -182,8 +182,8 @@ impl Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tool {
-    pub name: LocalStr,
-    pub description: LocalStr,
+    pub name: Str,
+    pub description: Str,
     pub parameters: serde_json::Value,
 }
 
@@ -191,7 +191,7 @@ pub struct Tool {
 #[serde(rename_all = "camelCase")]
 pub struct Context {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<LocalStr>,
+    pub system_prompt: Option<Str>,
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
@@ -216,18 +216,18 @@ pub struct ModelCost {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
-    pub id: LocalStr,
-    pub name: LocalStr,
-    pub api: LocalStr,
-    pub provider: LocalStr,
-    pub base_url: LocalStr,
+    pub id: Str,
+    pub name: Str,
+    pub api: Str,
+    pub provider: Str,
+    pub base_url: Str,
     pub reasoning: bool,
     pub input: Vec<InputModality>,
     pub cost: ModelCost,
     pub context_window: u64,
     pub max_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<Vec<(LocalStr, LocalStr)>>,
+    pub headers: Option<Vec<(Str, Str)>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -263,10 +263,10 @@ pub enum ThinkingLevel {
 pub struct StreamOptions {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
-    pub api_key: Option<LocalStr>,
+    pub api_key: Option<Str>,
     pub cache_retention: Option<CacheRetention>,
-    pub session_id: Option<LocalStr>,
-    pub headers: Option<Vec<(LocalStr, LocalStr)>>,
+    pub session_id: Option<Str>,
+    pub headers: Option<Vec<(Str, Str)>>,
     pub max_retry_delay_ms: Option<u64>,
     pub reasoning: Option<ThinkingLevel>,
 }

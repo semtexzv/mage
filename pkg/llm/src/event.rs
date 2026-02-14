@@ -1,4 +1,4 @@
-use refstr::LocalStr;
+use refstr::Str;
 
 use crate::types::{AssistantMessage, ContentBlock, StopReason, Usage};
 
@@ -14,25 +14,25 @@ pub enum AssistantMessageEvent {
     /// New text content block at `content_index`.
     TextStart { content_index: usize },
     /// Text delta.
-    TextDelta { content_index: usize, delta: LocalStr },
+    TextDelta { content_index: usize, delta: Str },
     /// Text block complete.
     TextEnd { content_index: usize },
     /// New thinking block at `content_index`.
     ThinkingStart { content_index: usize },
     /// Thinking delta.
-    ThinkingDelta { content_index: usize, delta: LocalStr },
+    ThinkingDelta { content_index: usize, delta: Str },
     /// Thinking block complete.
-    ThinkingEnd { content_index: usize, signature: Option<LocalStr> },
+    ThinkingEnd { content_index: usize, signature: Option<Str> },
     /// New tool call block at `content_index`. Carries id and name from the provider.
-    ToolCallStart { content_index: usize, id: LocalStr, name: LocalStr },
+    ToolCallStart { content_index: usize, id: Str, name: Str },
     /// Raw JSON delta for tool call arguments (informational, for UI streaming).
-    ToolCallDelta { content_index: usize, delta: LocalStr },
+    ToolCallDelta { content_index: usize, delta: Str },
     /// Tool call block complete. Carries the final parsed arguments.
     ToolCallEnd { content_index: usize, arguments: serde_json::Value },
     /// Stream completed normally.
     Done { reason: StopReason },
     /// Stream ended with error.
-    Error { reason: StopReason, error: Option<LocalStr> },
+    Error { reason: StopReason, error: Option<Str> },
     /// Usage update (non-terminal).
     Usage { usage: Usage },
 }

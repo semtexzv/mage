@@ -67,9 +67,9 @@ Properties:
 The single source of truth for which binary is active. Append-only JSONL
 (one JSON object per line). The last line is the current generation.
 
-  {"name":"mage-gentle-fox","bundle_hash":"a1b2c3...","parent":null,"timestamp":"2026-02-10T14:30:00Z","generation":0,"toolchain":"rustc 1.85.0","status":"healthy"}
-  {"name":"mage-happy-wolf","bundle_hash":"d4e5f6...","parent":"mage-gentle-fox","timestamp":"2026-02-12T09:15:00Z","generation":1,"toolchain":"rustc 1.85.0","status":"healthy"}
-  {"name":"mage-brave-eagle","bundle_hash":"g7h8i9...","parent":"mage-happy-wolf","timestamp":"2026-02-13T16:42:00Z","generation":2,"toolchain":"rustc 1.85.0","status":"healthy"}
+  {"name":"mage-gentle-fox","sdk_version":"0.3.2","sdk_hash":"sha256:a0b1c2...","bundle_hash":"a1b2c3...","parent":null,"timestamp":"2026-02-10T14:30:00Z","generation":0,"toolchain":"rustc 1.85.0","status":"healthy"}
+  {"name":"mage-happy-wolf","sdk_version":"0.3.2","sdk_hash":"sha256:a0b1c2...","bundle_hash":"d4e5f6...","parent":"mage-gentle-fox","timestamp":"2026-02-12T09:15:00Z","generation":1,"toolchain":"rustc 1.85.0","status":"healthy"}
+  {"name":"mage-brave-eagle","sdk_version":"0.3.2","sdk_hash":"sha256:a0b1c2...","bundle_hash":"g7h8i9...","parent":"mage-happy-wolf","timestamp":"2026-02-13T16:42:00Z","generation":2,"toolchain":"rustc 1.85.0","status":"healthy"}
 
 Properties:
 
@@ -91,7 +91,7 @@ Properties:
 
 Example: upgrade attempt that fails and rolls back:
 
-  {"name":"mage-gentle-fox",...,"status":"healthy"}
+  {"name":"mage-gentle-fox","sdk_version":"0.3.2",...,"status":"healthy"}
   {"name":"mage-happy-wolf",...,"status":"healthy"}
   {"name":"mage-brave-eagle",...,"status":"pending"}
   {"name":"mage-brave-eagle",...,"status":"failed"}
@@ -195,6 +195,8 @@ Not in filenames. Filenames are for humans.
 Each binary has a companion .meta file:
 
   {
+    "sdk_version": "0.3.2",
+    "sdk_hash": "sha256:a0b1c2d3e4f5...",
     "bundle_hash": "a1b2c3d4e5f6...",
     "parent_hash": "previous-hash-or-null",
     "parent_name": "mage-happy-wolf",
@@ -248,9 +250,9 @@ List all installed versions:
 
   mage versions
 Output:
-  gentle-fox     2026-02-10 14:30  gen 0  healthy   (initial)
-  happy-wolf     2026-02-12 09:15  gen 1  healthy
-  brave-eagle    2026-02-13 16:42  gen 2  healthy    <- current
+  gentle-fox     2026-02-10 14:30  gen 0  sdk 0.3.2  healthy   (initial)
+  happy-wolf     2026-02-12 09:15  gen 1  sdk 0.3.2  healthy
+  brave-eagle    2026-02-13 16:42  gen 2  sdk 0.3.2  healthy    <- current
 Information comes from generations.jsonl. Fast, no binary introspection needed.
 
 
@@ -292,14 +294,15 @@ main.rs embeds:
   const MAGE_GENERATION_NAME: &str = "mage-brave-eagle";
   const MAGE_BUNDLE_HASH: &str = "g7h8i9...";
   const MAGE_GENERATION: u32 = 2;
+  const MAGE_SDK_VERSION: &str = "0.3.2";
 
 The binary can report this via:
 
   mage --version
-  mage-brave-eagle (gen 2, hash g7h8i9, rustc 1.85.0)
+  mage-brave-eagle (gen 2, sdk 0.3.2, hash g7h8i9, rustc 1.85.0)
 
   mage --identity
-  {"name":"mage-brave-eagle","generation":2,"bundle_hash":"g7h8i9...","parent":"mage-happy-wolf"}
+  {"name":"mage-brave-eagle","generation":2,"sdk_version":"0.3.2","bundle_hash":"g7h8i9...","parent":"mage-happy-wolf"}
 
 The monitor uses --identity to verify which binary it actually spawned
 (defense against races where generations.jsonl changes between read and spawn).
@@ -310,6 +313,66 @@ The agent uses its own identity to:
   - Report its version in health check responses
   - Know which generation it is when writing new entries
 
+
+## SDK Updates
+
+The mage SDK is published to crates.io. Each compiled binary records which SDK
+version it was built against (MAGE_SDK_VERSION). Managing the SDK version is
+done through the `mage sdk` subcommand.
+
+
+### mage sdk current
+
+Shows the SDK version the running binary was built against:
+
+  mage sdk current
+  mage sdk 0.3.2 (sha256:a0b1c2...)
+
+
+### mage sdk upgrade
+
+Checks crates.io for the latest compatible SDK version, rebuilds the binary
+against it, and creates a new generation:
+
+  mage sdk upgrade
+
+This is a generation event like any other:
+  1. mage-build stages a new build with `mage = "<latest>"` in generated Cargo.toml
+  2. Compiles the new binary
+  3. Appends to generations.jsonl with status "pending" and the new sdk_version
+  4. Hands off to the monitor for health check
+  5. On pass: status becomes "healthy". On fail: rolls back to previous generation.
+
+The generation entry records the new sdk_version and sdk_hash, providing full
+audit trail of SDK changes in the lineage.
+
+  mage sdk upgrade --to 0.4.0
+
+Upgrades to a specific version instead of latest compatible.
+
+
+### mage sdk pin
+
+Pins the SDK version so that agent self-replication uses the same version
+rather than picking up a newer one:
+
+  mage sdk pin 0.3.2
+  mage sdk pin --unpin
+
+When pinned, mage-build injects the pinned version into generated Cargo.toml
+regardless of what the latest published version is.
+
+
+### Automatic update notification
+
+On startup (or periodically during long sessions), the binary checks whether
+a newer SDK version is available on crates.io. If one is found, it displays
+a non-blocking notification:
+
+  [info] mage sdk 0.4.0 available (current: 0.3.2). Run `mage sdk upgrade` to update.
+
+This is informational only — never an error, never blocks execution. The user
+decides when to upgrade. The check is skipped if the SDK version is pinned.
 
 ## Windows
 

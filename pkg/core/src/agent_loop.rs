@@ -362,7 +362,7 @@ async fn execute_tools(
     outbox: &mut Vec<(AgentMessage, DeliverAs)>,
     steering_queue: &mut Vec<AgentMessage>,
     follow_up_queue: &mut Vec<AgentMessage>,
-    tool_calls: &[(refstr::LocalStr, refstr::LocalStr, serde_json::Value)],
+    tool_calls: &[(refstr::Str, refstr::Str, serde_json::Value)],
 ) -> Vec<llm::ToolResultMessage> {
     let mut tool_result_messages = Vec::new();
 
@@ -516,8 +516,8 @@ fn drain_outbox(
 }
 
 fn make_error_result(
-    tool_call_id: refstr::LocalStr,
-    tool_name: refstr::LocalStr,
+    tool_call_id: refstr::Str,
+    tool_name: refstr::Str,
     message: String,
 ) -> llm::ToolResultMessage {
     llm::ToolResultMessage {

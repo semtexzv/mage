@@ -1,4 +1,4 @@
-use refstr::LocalStr;
+use refstr::Str;
 
 use llm::{
     AssistantMessageEvent, Message, Model,
@@ -60,7 +60,7 @@ pub enum AgentMessage {
     Llm(Message),
     /// Application-defined custom message. Opaque to the loop.
     Custom {
-        role: LocalStr,
+        role: Str,
         data: serde_json::Value,
         timestamp: u64,
     },
@@ -108,13 +108,13 @@ pub enum AgentEvent {
         message: AgentMessage,
     },
     ToolExecutionStart {
-        tool_call_id: LocalStr,
-        tool_name: LocalStr,
+        tool_call_id: Str,
+        tool_name: Str,
         args: serde_json::Value,
     },
     ToolExecutionEnd {
-        tool_call_id: LocalStr,
-        tool_name: LocalStr,
+        tool_call_id: Str,
+        tool_name: Str,
         result: ToolResult,
         is_error: bool,
     },

@@ -1,7 +1,7 @@
 use anthropic::api_types::{MessageContent, MessageRole, ContentBlockParam};
 use anthropic::convert::build_request_body;
 use llm::*;
-use refstr::LocalStr;
+use refstr::Str;
 use serde_json::{json, Value};
 
 fn test_model() -> Model {
@@ -81,9 +81,9 @@ fn tool_result_batching() {
                     thought_signature: None,
                 },
             ],
-            api: LocalStr::new(),
-            provider: LocalStr::new(),
-            model: LocalStr::new(),
+            api: Str::new(),
+            provider: Str::new(),
+            model: Str::new(),
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
             error_message: None,

@@ -36,3 +36,4 @@ UI notification for binary switching. Previous 4-tier model under revision.
 | 5 | SDK re-export surface | Decided | `DESIGN-SDK.md` |
 | 6 | Extension sources / modroots | Open | `DESIGN-EXTENSIONS.md` |
 | 7 | TUI rendering + tool output | Decided | `DESIGN-TUI.md`, `DESIGN-TOOL-RENDERING.md` |
+| 8 | SDK distribution model | Decided | `DESIGN-SDK.md` |

@@ -203,10 +203,7 @@ mage-build Module::parse_file()
           ▼
 
 mage-build Bundle::new("my-app-with-my-tool")
-  .add_core_crate(pkg/sdk)         ← mage SDK always injected
-  .add_core_crate(pkg/core)        ← agent-core types
-  .add_core_crate(pkg/llm)         ← LLM types
-  .add_core_crate(pkg/refstr)     ← string types
+  .sdk_version("0.3.2")           ← SDK from crates.io, not path deps
   .add_module(my_tool_module)      ← the extension
   .with_template(MageTemplate)     ← generates main.rs that wires everything
   .with_toolchain(system)
@@ -215,7 +212,7 @@ mage-build Bundle::new("my-app-with-my-tool")
           ▼
 
 Bundle::generate()
-  → writes Cargo.toml (with resolved deps, workspace members, patches)
+  → writes Cargo.toml (with SDK registry dep, resolved extension deps, patches)
   → renders main.rs from template (includes #[path] to extension, calls init())
   → writes to /tmp/mage/{bundle-hash}/ (transient staging, see DESIGN-REPRODUCIBLE-BUILDS.md)
 
@@ -277,9 +274,10 @@ selection (`mage --use <petname>`), and cleanup.
 
 `mage-build`'s snapshot captures the entire source state as a zstd-compressed
 tar archive embedded in the binary (see DESIGN-REPRODUCIBLE-BUILDS.md):
-- All module source code
+- All module source code (extensions only — not SDK sources)
 - Generated template output
-- Core crate sources
+- SDK version and hash (not source — resolved from crates.io)
+- Cargo.lock (pins SDK + all transitive deps for exact reproducibility)
 - Dependency specs and resolved versions
 - Parent hash for lineage tracking
 This enables:
@@ -396,11 +394,11 @@ Module parsing via `syn` extracts:
 - Function signatures (especially `init()` hooks)
 - Whether the module is single-file or directory
 
-**Bundle** — Aggregates modules + template + toolchain + core crates + patches:
+**Bundle** — Aggregates modules + template + toolchain + SDK version + patches:
 ```rust
 let bundle = Bundle::new("my-agent")
     .with_config(config)
-    .add_core_crate(sdk_path)
+    .sdk_version("0.3.2")
     .add_module(extension_module)
     .add_shared(shared_lib_path)
     .add_patch("crates-io", "tokio", PatchSource::Path(tokio_path))
@@ -440,17 +438,17 @@ pub trait Template {
 
 `Bundle::generate()` writes:
 ```
-/tmp/mage/{bundle-hash}/               # transient staging directory
-├── Cargo.toml         # Generated: [package], [workspace] members, [dependencies], [patch]
+/tmp/mage/{bundle-hash}/
+├── Cargo.toml         # Generated: [package], [dependencies] with mage = "X.Y.Z", extension deps, [patch]
+├── Cargo.lock         # Pinned: SDK + all transitive deps
 ├── src/
 │   ├── main.rs        # Generated from template
 │   └── snapshot.tar.zst  # Embedded via include_bytes!
-├── modules/           # Symlinks to extension sources
-└── core/              # Symlinks to mage SDK crates
+└── modules/           # Symlinks to extension sources
 ```
 
 Module source files are referenced at their original paths via `#[path = "..."]` attributes.
-Core crates and shared libs are referenced as workspace members with relative paths.
+The SDK (`mage`) is a registry dependency in the generated Cargo.toml, not a local path. No `core/` directory exists in staging.
 
 ### Compilation
 

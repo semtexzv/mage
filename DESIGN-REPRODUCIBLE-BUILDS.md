@@ -56,7 +56,8 @@ machine-specific information.
   Bundle ID                            id.as_bytes()
   Module sources                       sorted by name, then for each: name + file content
   Template output                      rendered main.rs source + sorted dependency strings
-  Core crate identity                  sorted by name, then for each: name + version string
+  SDK version                          mage crate version string (e.g. "0.3.2")
+  SDK registry checksum                checksum from crates.io index
   Patch configuration                  sorted by (registry, crate), then serialized patch spec
   Asset content                        sorted by path, then for each: path + content bytes
   Toolchain VERSION STRING             e.g. "rustc 1.85.0 (abc123def 2025-02-01)"
@@ -86,11 +87,10 @@ Pseudocode:
           for d in &deps { h.update(d.as_bytes()); }
       }
 
-      let mut cores: Vec<_> = bundle.core_crates.iter().collect();
-      cores.sort();
-      for c in &cores {
-          h.update(c.name.as_bytes());
-          h.update(c.version.as_bytes());  // version STRING, not path
+      // SDK: version + registry checksum (not source, not path)
+      h.update(bundle.sdk_version.as_bytes());  // e.g. "0.3.2"
+      if let Some(ref checksum) = bundle.sdk_checksum {
+          h.update(checksum.as_bytes());  // from crates.io index
       }
 
       // Toolchain: version string only, NOT paths
@@ -136,6 +136,7 @@ Pseudocode:
   Hostname                     Machine-specific
   Timestamps                   Non-deterministic
   CARGO_MANIFEST_DIR value     Derived from staging path, which is derived from hash
+  SDK source code              Covered by version + registry checksum. Same version = same code.
 
 
 ### Why toolchain version string, not paths
@@ -178,8 +179,10 @@ Combined with --remap-path-prefix, the binary contains no machine-specific paths
 
 ## Symlinks: Why Not Copies
 
-Modules, core crates, and shared libraries are symlinked into the staging
-directory, not copied. This matters for two reasons:
+Extension module sources are symlinked into the staging directory, not copied.
+Core crates (the SDK) are no longer in the staging directory — they are fetched
+from the crates.io registry by Cargo as normal dependencies. Symlinks apply only
+to extension module sources. This matters for two reasons:
 
 1. Mtime preservation for Cargo fingerprinting
 
@@ -196,13 +199,14 @@ directory, not copied. This matters for two reasons:
 
 2. Disk space
 
-   Core crates are the same files across all builds. Symlinks cost nothing.
+   Extension module sources may be shared across builds. Symlinks cost nothing.
    Copies duplicate them per staging directory.
 
 Caveat: Cargo calls canonicalize() on the workspace root. Symlinks to the
 workspace root itself don't provide path stability. But symlinks WITHIN the
-workspace (modules/, core/, libs/) work fine because Cargo sees them as
-relative path dependencies.
+workspace (modules/) work fine because Cargo sees them as relative path
+dependencies. Core crates (the SDK) are fetched from the registry by Cargo
+and never appear as symlinks in the staging directory.
 
 The staging directory itself is a real directory (not a symlink) at the
 fixed path /tmp/mage/{bundle-hash}/.
