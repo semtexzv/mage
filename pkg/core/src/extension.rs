@@ -29,7 +29,7 @@ use refstr::LocalStr;
 
 use llm::{AssistantMessageEvent, CancelToken, Model, ToolResultMessage, UserContent};
 
-use crate::tool::{ToolDef, ToolResult};
+use crate::tool::{ErasedTool, Tool, ToolResult, erase_tool};
 use crate::types::{AgentMessage, DeliverAs};
 
 // ---------------------------------------------------------------------------
@@ -69,7 +69,6 @@ pub struct BeforeStartAmend {
 
 pub struct ToolResultAmend {
     pub content: Option<Vec<UserContent>>,
-    pub details: Option<serde_json::Value>,
     pub is_error: Option<bool>,
 }
 
@@ -203,13 +202,13 @@ impl<'a> HookCtx<'a> {
 /// Mutable registry passed to `Extension::init`. Extensions use it to
 /// register tools and providers into the agent.
 pub struct Registry<'a> {
-    pub(crate) tools: &'a mut Vec<ToolDef>,
+    pub(crate) tools: &'a mut Vec<Box<dyn ErasedTool>>,
     pub(crate) providers: &'a mut Vec<(LocalStr, std::rc::Rc<dyn llm::Provider>)>,
 }
 impl<'a> Registry<'a> {
-    /// Register a tool.
-    pub fn tool(&mut self, tool: ToolDef) {
-        self.tools.push(tool);
+    /// Register a tool. Wraps the concrete `Tool` impl into type-erased storage.
+    pub fn tool(&mut self, tool: impl Tool) {
+        self.tools.push(erase_tool(tool));
     }
     /// Register a provider under an API name (e.g. `"anthropic"`).
     /// The agent resolves the provider from `model.api`.

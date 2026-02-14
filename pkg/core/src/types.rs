@@ -5,7 +5,7 @@ use llm::{
     ThinkingLevel, ToolResultMessage,
 };
 
-use crate::tool::{ToolDef, ToolResult};
+use crate::tool::{ErasedTool, ToolResult};
 
 // ---------------------------------------------------------------------------
 // Agent-level thinking (extends LLM's ThinkingLevel with "off")
@@ -112,12 +112,6 @@ pub enum AgentEvent {
         tool_name: LocalStr,
         args: serde_json::Value,
     },
-    ToolExecutionUpdate {
-        tool_call_id: LocalStr,
-        tool_name: LocalStr,
-        args: serde_json::Value,
-        partial_result: ToolResult,
-    },
     ToolExecutionEnd {
         tool_call_id: LocalStr,
         tool_name: LocalStr,
@@ -140,7 +134,7 @@ pub struct AgentState {
     pub system_prompt: String,
     pub model: Model,
     pub messages: Vec<AgentMessage>,
-    pub tools: Vec<ToolDef>,
+    pub(crate) tools: Vec<Box<dyn ErasedTool>>,
     pub options: llm::StreamOptions,
 }
 

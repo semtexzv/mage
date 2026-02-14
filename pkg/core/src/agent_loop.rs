@@ -17,6 +17,7 @@ use crate::extension::{
     ToolResultArgs, TurnEndArgs, AgentEndArgs, ContextAmend, Registry,
 };
 use crate::types::{AgentEvent, AgentMessage, AgentState, DeliverAs};
+use crate::tool::{ToolResult, ToolContent};
 
 const MAX_LLM_RETRIES: u32 = 3;
 const BASE_RETRY_DELAY_MS: u64 = 1000;
@@ -398,7 +399,7 @@ async fn execute_tools(
         }
 
         // Find the tool
-        let tool_idx = match state.tools.iter().position(|t| *t.name == **call_name) {
+        let tool_idx = match state.tools.iter().position(|t| t.name() == &**call_name) {
             Some(i) => i,
             None => {
                 tool_result_messages.push(make_error_result(
@@ -425,10 +426,15 @@ async fn execute_tools(
         }
 
         // Execute the tool
-        let mut result = (state.tools[tool_idx].execute)(
+        let erased_exec = state.tools[tool_idx].execute(
             call_id, call_args.clone(), cancel.clone(),
-        ).await;
-        let mut is_error = false;
+        );
+        let mut result = match erased_exec {
+            crate::tool::ErasedExecution::Ready(r) => r,
+            crate::tool::ErasedExecution::Running(task) => task.await,
+            crate::tool::ErasedExecution::Custom { task } => task.await,
+        };
+        let mut is_error = result.is_error();
 
         // --- on_tool_result (chain) ---
         for h in hooks.iter_mut() {
@@ -444,10 +450,11 @@ async fn execute_tools(
                 Disposition::Block { .. } => break,
                 Disposition::Value(amend) => {
                     if let Some(content) = amend.content {
-                        result.content = content;
-                    }
-                    if let Some(details) = amend.details {
-                        result.details = details;
+                        result = if is_error {
+                            ToolResult::Failure(ToolContent::rich(content))
+                        } else {
+                            ToolResult::Success(ToolContent::rich(content))
+                        };
                     }
                     if let Some(err) = amend.is_error {
                         is_error = err;
@@ -472,11 +479,12 @@ async fn execute_tools(
             }
         }
 
+        let tool_content = state.tools[tool_idx].to_result(&result);
         tool_result_messages.push(llm::ToolResultMessage {
             tool_call_id: call_id.clone(),
             tool_name: call_name.clone(),
-            content: result.content,
-            details: Some(result.details),
+            content: tool_content.content,
+            details: None,
             is_error,
             timestamp: 0,
         });
