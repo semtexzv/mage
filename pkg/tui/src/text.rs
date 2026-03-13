@@ -171,8 +171,22 @@ impl Text {
     }
 
     /// Build the styled string from all spans.
+    ///
+    /// When a background color is set, span resets re-establish the bg
+    /// so the fill color is never interrupted by `\x1b[0m`.
     fn build_styled_content(&self) -> String {
+        // If bg is set, after each styled span we reset then immediately
+        // re-establish the bg so unstyled text and fill spaces keep it.
+        let reset_seq: String = match self.bg {
+            Some(color) => format!("{}\x1b[{}m", RESET, color.bg_code()),
+            None => RESET.to_string(),
+        };
         let mut buf = String::new();
+        // When bg is set, establish it at the start so unstyled leading
+        // spans also render on the correct background.
+        if let Some(color) = self.bg {
+            buf.push_str(&format!("\x1b[{}m", color.bg_code()));
+        }
         for span in &self.spans {
             if span.text.is_empty() {
                 continue;
@@ -181,7 +195,7 @@ impl Text {
             if !sgr.is_empty() {
                 buf.push_str(&sgr);
                 buf.push_str(&span.text);
-                buf.push_str(RESET);
+                buf.push_str(&reset_seq);
             } else {
                 buf.push_str(&span.text);
             }
@@ -251,5 +265,49 @@ impl Text {
 impl View for Text {
     fn render(&mut self, sink: &mut impl LineSink) {
         Text::render(self, sink);
+    }
+}
+
+/// A full-width horizontal rule widget. Renders a single line of repeated characters.
+pub struct HRule {
+    ch: char,
+    style: Style,
+    cached: Option<(u16, Line)>,
+}
+
+impl HRule {
+    pub fn new(ch: char, fg: Color) -> Self {
+        Self {
+            ch,
+            style: Style::new().fg(fg),
+            cached: None,
+        }
+    }
+
+    /// Render into any line sink. Uses `sink.width()` for layout.
+    pub fn render(&mut self, sink: &mut impl LineSink) {
+        let w = sink.width();
+        // Check cache
+        if let Some((cached_w, ref line)) = self.cached {
+            if cached_w == w {
+                sink.push_lines(&[line.clone()]);
+                return;
+            }
+        }
+        let sgr = self.style.to_sgr();
+        let content = self.ch.to_string().repeat(w as usize);
+        let line: Line = if sgr.is_empty() {
+            Rc::from(content.as_str())
+        } else {
+            Rc::from(format!("{sgr}{content}{RESET}").as_str())
+        };
+        sink.push_lines(&[line.clone()]);
+        self.cached = Some((w, line));
+    }
+}
+
+impl View for HRule {
+    fn render(&mut self, sink: &mut impl LineSink) {
+        HRule::render(self, sink);
     }
 }

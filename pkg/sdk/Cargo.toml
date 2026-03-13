@@ -11,3 +11,4 @@ mage-llm = { path = "../llm" }
 mage-tui = { path = "../tui" }
 mage-build = { path = "../build" }
 refstr = { path = "../refstr" }
+async-trait.workspace = true

@@ -16,8 +16,7 @@ use crate::ansi::{
     CRLF, CR, SHOW_CURSOR, HIDE_CURSOR,
     cursor_up, cursor_down, cursor_col,
 };
-use crate::style::{Color, Padding, Theme};
-use crate::wrap::wrap_text;
+use crate::style::{Color, Theme};
 
 const MAX_PREV_LINES: usize = 10_000;
 
@@ -171,14 +170,6 @@ impl Renderer {
         self.cursor = Some(CursorPos { row, col });
     }
 
-    /// Overwrite an already-pushed line for overlay compositing.
-    /// The diff engine sees the changed line and repaints it.
-    pub fn overwrite_line(&mut self, row: usize, content: impl Into<Line>) {
-        if row < self.lines.len() {
-            self.lines[row] = content.into();
-        }
-    }
-
     /// Composite overlay content into an existing line at a column range.
     ///
     /// Splices `content` into line `row` starting at visible column `col`,
@@ -227,62 +218,9 @@ impl Renderer {
         self.width = width;
         self.height = height;
     }
-
-    /// Push word-wrapped text with padding and optional background fill.
-    pub fn push_text_styled(&mut self, content: &str, padding: &Padding, bg: Option<Color>) {
-        let w = self.width as usize;
-        let left = padding.left as usize;
-        let right = padding.right as usize;
-        let inner_width = w.saturating_sub(left).saturating_sub(right);
-        let left_prefix = if left > 0 { " ".repeat(left) } else { String::new() };
-        for _ in 0..padding.top {
-            if let Some(color) = bg {
-                self.push_line(Self::bg_filled_line("", w, color));
-            } else if left > 0 {
-                self.push_line(left_prefix.as_str());
-            } else {
-                self.push_blank();
-            }
-        }
-        // Word-wrap and emit content lines
-        if inner_width > 0 && !content.is_empty() {
-            let wrapped = wrap_text(content, inner_width);
-            for line in &wrapped {
-                let left_pad = " ".repeat(left);
-                let padded = format!("{}{}", left_pad, line);
-                if let Some(color) = bg {
-                    self.push_line(Self::bg_filled_line(&padded, w, color));
-                } else {
-                    self.push_line(padded);
-                }
-            }
-        } else if !content.is_empty() {
-            // Width too small, just push content
-            self.push_line(content);
-        }
-        // Emit bottom padding
-        for _ in 0..padding.bottom {
-            if let Some(color) = bg {
-                self.push_line(Self::bg_filled_line("", w, color));
-            } else if left > 0 {
-                self.push_line(left_prefix.as_str());
-            } else {
-                self.push_blank();
-            }
-        }
-    }
-
-    /// Push an input line with prompt and set cursor position.
-    pub fn push_input(&mut self, prompt: &str, content: &str, cursor: usize) {
-        let line = format!("{}{}", prompt, content);
-        let row = self.lines.len();
-        self.push_line(line);
-        let col = visible_width(prompt) + cursor;
-        self.set_cursor(row, col);
-    }
     /// Create a line filled to `width` with a background color.
     /// The visible content is padded with spaces to fill the full width.
-    pub fn bg_filled_line(content: &str, width: usize, color: Color) -> String {
+    pub(crate) fn bg_filled_line(content: &str, width: usize, color: Color) -> String {
         let vis_width = visible_width(content);
         let fill = width.saturating_sub(vis_width);
         let bg_start = format!("\x1b[{}m", color.bg_code());
@@ -626,4 +564,35 @@ impl Renderer {
         }
         self.hw_cursor_row = target;
     }
+}
+
+// ── Widget traits ────────────────────────────────────────────────────────────
+
+/// Minimal line-output interface that widgets render into.
+///
+/// `Renderer` implements this, but so can test harnesses or nested containers.
+pub trait LineSink {
+    /// Available width in terminal columns.
+    fn width(&self) -> u16;
+    /// Append a slice of pre-rendered lines.
+    fn push_lines(&mut self, lines: &[Line]);
+}
+
+impl LineSink for Renderer {
+    fn width(&self) -> u16 {
+        self.width
+    }
+    fn push_lines(&mut self, lines: &[Line]) {
+        self.lines.extend_from_slice(lines);
+    }
+}
+
+/// A renderable widget. Implemented by `Text`, `Markdown`, `AnimatedText`, etc.
+pub trait View {
+    fn render(&mut self, sink: &mut impl LineSink);
+}
+
+/// A blank `Rc<str>` line — shared singleton for empty rows.
+pub fn blank_line() -> Line {
+    Rc::from("")
 }

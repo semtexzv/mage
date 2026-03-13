@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 const OAUTH_TOKEN_PREFIX: &str = "sk-ant-oat";
-const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
-const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+pub(crate) const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+pub(crate) const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 /// Version string sent in `user-agent` when mimicking Claude Code.
 pub const CLAUDE_CODE_VERSION: &str = "2.1.2";

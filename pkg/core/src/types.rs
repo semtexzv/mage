@@ -1,15 +1,12 @@
+//! Core types: messages, events, tool results.
+
 use std::fmt;
 use std::ops::Deref;
 
 use refstr::Str;
 use uuid::Uuid;
 
-use llm::{
-    AssistantMessageEvent, Model,
-    ThinkingLevel, ToolResultMessage,
-};
-
-use crate::tool::{ErasedTool, ToolResult};
+use llm::{AssistantMessageEvent, ThinkingLevel, ToolResultMessage};
 
 // ---------------------------------------------------------------------------
 // Agent-level thinking (extends LLM's ThinkingLevel with "off")
@@ -149,7 +146,6 @@ impl Message {
             MessageBody::User { content } => {
                 llm::Message::User(llm::UserMessage {
                     content: content.clone(),
-                    timestamp: self.timestamp,
                 })
             }
             MessageBody::Assistant {
@@ -166,10 +162,9 @@ impl Message {
                     api: api.clone(),
                     provider: provider.clone(),
                     model: model.clone(),
-                    usage: usage.clone(),
-                    stop_reason: stop_reason.clone(),
+                    usage: *usage,
+                    stop_reason: *stop_reason,
                     error_message: error_message.clone(),
-                    timestamp: self.timestamp,
                 })
             }
             MessageBody::ToolResult {
@@ -185,7 +180,6 @@ impl Message {
                     content: content.clone(),
                     details: details.clone(),
                     is_error: *is_error,
-                    timestamp: self.timestamp,
                 })
             }
             MessageBody::CompactionSummary { summary, .. } => {
@@ -193,7 +187,6 @@ impl Message {
                     content: llm::UserMessageContent::Text(
                         format!("<summary>{summary}</summary>"),
                     ),
-                    timestamp: self.timestamp,
                 })
             }
             MessageBody::BranchSummary { summary, .. } => {
@@ -201,13 +194,11 @@ impl Message {
                     content: llm::UserMessageContent::Text(
                         format!("<summary>{summary}</summary>"),
                     ),
-                    timestamp: self.timestamp,
                 })
             }
             MessageBody::Custom { content, .. } => {
                 llm::Message::User(llm::UserMessage {
                     content: content.clone(),
-                    timestamp: self.timestamp,
                 })
             }
         }
@@ -234,7 +225,6 @@ impl Message {
     }
 
     pub fn from_assistant(a: llm::AssistantMessage) -> Self {
-        let timestamp = a.timestamp;
         Self {
             body: MessageBody::Assistant {
                 content: a.content,
@@ -245,13 +235,12 @@ impl Message {
                 stop_reason: a.stop_reason,
                 error_message: a.error_message,
             },
-            timestamp,
+            timestamp: 0,
             ephemeral: false,
         }
     }
 
     pub fn from_tool_result(tr: ToolResultMessage) -> Self {
-        let timestamp = tr.timestamp;
         Self {
             body: MessageBody::ToolResult {
                 tool_call_id: tr.tool_call_id,
@@ -260,7 +249,7 @@ impl Message {
                 details: tr.details,
                 is_error: tr.is_error,
             },
-            timestamp,
+            timestamp: 0,
             ephemeral: false,
         }
     }
@@ -322,7 +311,49 @@ impl Message {
 }
 
 // ---------------------------------------------------------------------------
-// Agent events
+// ToolResult — what a tool returns
+// ---------------------------------------------------------------------------
+
+/// The outcome of a tool execution.
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    pub content: Vec<llm::UserContent>,
+    pub is_error: bool,
+}
+
+impl ToolResult {
+    pub fn success(s: impl Into<String>) -> Self {
+        Self {
+            content: vec![llm::UserContent::Text { text: s.into() }],
+            is_error: false,
+        }
+    }
+
+    pub fn failure(s: impl Into<String>) -> Self {
+        Self {
+            content: vec![llm::UserContent::Text { text: s.into() }],
+            is_error: true,
+        }
+    }
+
+    pub fn skipped() -> Self {
+        Self::failure("Skipped (interrupted)")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolUpdate — progress from a running tool
+// ---------------------------------------------------------------------------
+
+/// Progress update sent from a tool to the UI via [`crate::extension::ToolHandle`].
+#[derive(Debug, Clone)]
+pub struct ToolUpdate {
+    pub content: Vec<llm::UserContent>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent events — emitted by the loop for UI / observers
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -331,71 +362,45 @@ pub enum AgentEvent {
     AgentEnd {
         messages: Vec<Message>,
     },
-    TurnStart,
+    TurnStart {
+        turn_index: usize,
+    },
     TurnEnd {
+        turn_index: usize,
         message: Message,
-        tool_results: Vec<ToolResultMessage>,
+        tool_results: Vec<ToolResult>,
     },
     MessageStart {
         message: Message,
     },
-    MessageUpdate {
-        message: Message,
-        assistant_message_event: AssistantMessageEvent,
+    MessageDelta {
+        event: AssistantMessageEvent,
     },
     MessageEnd {
         message: Message,
     },
-    ToolExecutionStart {
+    ToolExecStart {
         tool_call_id: Str,
         tool_name: Str,
         args: serde_json::Value,
     },
-    ToolExecutionEnd {
+    ToolExecUpdate {
+        tool_call_id: Str,
+        tool_name: Str,
+        update: ToolUpdate,
+    },
+    ToolExecEnd {
         tool_call_id: Str,
         tool_name: Str,
         result: ToolResult,
-        is_error: bool,
+    },
+    AgentError {
+        message: String,
     },
 }
 
 impl AgentEvent {
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::AgentEnd { .. })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Agent state — the mutable data the loop operates on
-// ---------------------------------------------------------------------------
-
-pub struct AgentState {
-    pub system_prompt: String,
-    pub model: Model,
-    pub messages: Vec<Message>,
-    pub(crate) tools: Vec<Box<dyn ErasedTool>>,
-    pub options: llm::StreamOptions,
-}
-
-impl AgentState {
-    /// Create a new `AgentState` with no tools.
-    pub fn new(
-        system_prompt: impl Into<String>,
-        model: llm::Model,
-        messages: Vec<Message>,
-        options: llm::StreamOptions,
-    ) -> Self {
-        Self {
-            system_prompt: system_prompt.into(),
-            model,
-            messages,
-            tools: Vec::new(),
-            options,
-        }
-    }
-
-    /// Convert tools to LLM tool schemas.
-    pub fn llm_tools(&self) -> Vec<llm::Tool> {
-        self.tools.iter().map(|t| t.to_llm_tool()).collect()
     }
 }

@@ -119,76 +119,82 @@ But within a single modroot, duplicates are an error.
 
 ---
 
-## Extension Init Contract — **Partially Decided**
+## Extension Init Contract — **Decided**
 
-### Problem
+### How extensions register tools and hooks
 
-The current extension model has two separate mechanisms:
+Extensions implement the `Extension` trait. Tools are registered as closures
+via `ExtensionRegistry::tool()` during `init`. Lifecycle hooks are async
+methods on the trait that receive `&mut ExtensionContext<'_>`.
 
-1. **Extension trait** (agentcore) — `impl Extension` with `init(&mut self, &mut Registry)` + hook methods
-2. **Module init hook** (metarust) — a free function `pub fn init()` discovered via syn AST parsing
+### Tool-only extension
 
-These need to converge for single-file extensions. A `.rs` file in `~/.mage/extensions/`
-should be able to:
-- Register tools
-- Subscribe to lifecycle hooks
-- Access agent state during hooks
-
-But the current metarust module format only detects `fn init()` and doesn't know about
-the Extension trait.
-
-### Proposal: Convention-Based Init
-
-A single-file extension exports a free `init` function that receives a `Registry`:
+A single-file extension that just registers a tool:
 
 ```rust
 // my_tool.rs
 // @dep reqwest = "0.12"
 use mage::prelude::*;
 
-struct MyTool;
+struct MyToolExtension;
 
-impl Tool for MyTool {
-    fn name(&self) -> &str { "my_tool" }
-    fn description(&self) -> &str { "Does a thing" }
-    fn parameters(&self) -> &serde_json::Value { &MY_TOOL_SCHEMA }
-
-    fn execute(&self, _id: &str, params: serde_json::Value, _cancel: CancelToken) -> ToolExecution {
-        let input = params["input"].as_str().unwrap_or("").to_string();
-        ToolExecution::running(async move {
-            ToolResult::success(format!("processed: {input}"))
-        })
+#[async_trait(?Send)]
+impl Extension for MyToolExtension {
+    fn init(&mut self, reg: &mut ExtensionRegistry) {
+        reg.tool(
+            llm::Tool {
+                name: "my_tool".into(),
+                description: "Does a thing".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "input": { "type": "string" } },
+                    "required": ["input"]
+                }),
+            },
+            |_id, params, _handle| async move {
+                let input = params["input"].as_str().unwrap_or("");
+                ToolResult::success(format!("processed: {input}"))
+            },
+        );
     }
-}
-pub fn init(reg: &mut Registry) {
-    reg.tool(MyTool);
 }
 ```
 
-The generated main.rs template calls `my_tool::init(&mut registry)` during agent setup.
+The generated main.rs template calls `my_tool::init()` during agent setup,
+which creates the extension and passes it to the agent loop.
 
-For extensions that need lifecycle hooks, they implement Extension and register the factory:
+### Extension with lifecycle hooks
+
+For extensions that need to observe or modify agent behavior:
 
 ```rust
 // my_hooks.rs
 use mage::prelude::*;
 
-struct MyHooks { call_count: u32 }
+struct MyHooks {
+    call_count: u32,
+}
 
+#[async_trait(?Send)]
 impl Extension for MyHooks {
-    fn init(&mut self, reg: &mut Registry) { /* register tools */ }
-    fn on_tool_call<'a>(&'a mut self, args: &'a ToolCallArgs<'a>, _ctx: &'a HookCtx)
-        -> HookFuture<'a, Disposition>
-    {
+    fn init(&mut self, reg: &mut ExtensionRegistry) {
+        // register tools here if needed
+    }
+
+    async fn on_tool_call(
+        &mut self,
+        event: &ToolCallEvent,
+        ctx: &mut ExtensionContext<'_>,
+    ) -> Option<ToolCallResult> {
         self.call_count += 1;
-        Box::pin(async { Disposition::Propagate })
+        None // no opinion — propagate
     }
 }
-
-pub fn init(factory_reg: &mut FactoryRegistry) {
-    factory_reg.register(|| Box::new(MyHooks { call_count: 0 }));
-}
 ```
+
+Hooks that participate in decisions return `Option<ResultStruct>`:
+- `None` — no opinion, continue to next extension
+- `Some(result)` — provide a decision (e.g. `Some(ToolCallResult { block: true, .. })` to prevent execution)
 
 ### Shared State Between Extensions and Tools
 
@@ -197,50 +203,33 @@ share it via `Rc<RefCell<T>>` (or `Rc<Cell<T>>` for simple values)
 between the extension and the tools it registers.
 
 ```rust
-// stateful_extension.rs
-use mage::prelude::*;
-
-struct SharedState {
-    call_count: u32,
-    cache: HashMap<String, String>,
-}
-
-pub fn init(reg: &mut Registry) {
-    let state = Rc::new(RefCell::new(SharedState {
-        call_count: 0,
-        cache: HashMap::new(),
-    }));
-
-    // Tool 1 reads and writes the shared state
-    let s = state.clone();
-    reg.tool(/* ... tool that captures `s` ... */);
-
-    // Tool 2 also accesses the same state
-    let s = state.clone();
-    reg.tool(/* ... another tool that captures `s` ... */);
-}
-```
-
-For extensions with lifecycle hooks, the state lives on the Extension
-struct itself. Tools registered during `Extension::init` can capture
-`Rc` clones of fields from the struct:
-
-```rust
 struct MyExtension {
     db: Rc<RefCell<DbConnection>>,
 }
 
+#[async_trait(?Send)]
 impl Extension for MyExtension {
-    fn init(&mut self, reg: &mut Registry) {
+    fn init(&mut self, reg: &mut ExtensionRegistry) {
         let db = self.db.clone();
-        reg.tool(/* ... tool that captures `db` ... */);
+        reg.tool(
+            llm::Tool { name: "db_query".into(), /* ... */ },
+            move |_id, params, _handle| {
+                let db = db.clone();
+                Box::pin(async move {
+                    // use db here
+                    ToolResult::success("result")
+                })
+            },
+        );
     }
 
-    fn on_tool_call<'a>(&'a mut self, args: &'a ToolCallArgs<'a>, _ctx: &'a HookCtx)
-        -> HookFuture<'a, Disposition>
-    {
-        // Hook can also access self.db
-        Box::pin(async { Disposition::Propagate })
+    async fn on_tool_call(
+        &mut self,
+        event: &ToolCallEvent,
+        ctx: &mut ExtensionContext<'_>,
+    ) -> Option<ToolCallResult> {
+        // can also access self.db here
+        None
     }
 }
 ```
@@ -255,11 +244,10 @@ on first use, not during init.
 `mage-build` already parses function signatures via syn. We can detect which variant
 by inspecting `init`'s parameter types:
 
-| Signature | Meaning |
+| Pattern | Use case |
 |---|---|
-| `fn init(reg: &mut Registry)` | Simple tool registration |
-| `fn init(reg: &mut FactoryRegistry)` | Full extension with lifecycle hooks |
-| `fn init()` | Legacy/simple — no registration, just side effects |
+| `impl Extension` with `fn init(&mut self, reg: &mut ExtensionRegistry)` | Tool registration + lifecycle hooks |
+| `ExtensionFactory = Box<dyn Fn() -> Box<dyn Extension>>` | Per-session fresh instances |
 
 The template generates the appropriate wiring based on what it detects.
 
@@ -268,11 +256,6 @@ The template generates the appropriate wiring based on what it detects.
 - **`mage::prelude`**: Yes. Re-exports everything an extension needs.
 - **Async init**: No. Init is sync. Extensions that need async setup do it lazily on first use.
 - **`#[mage::extension]` attribute**: Deferred. Not needed now.
-
-### Open Sub-questions
-
-- Registry method signature: should it take the extension directly, or a lambda/factory?
-  Leaning lambda for extensions with lifecycle hooks (so each session gets a fresh instance).
 
 ---
 
@@ -313,11 +296,11 @@ Four modroots, searched in order (later overrides earlier for same-name modules)
 #### Built-in (modroot 1)
 
 Built-in extensions live in `extensions/tools-coding/` in the mage source tree.
-They are compiled directly into `mage-host` as feature-gated dependencies.
+They are compiled directly into the synthesized binary by the `MageTemplate`.
 Not on the module search path at all — they're just Rust code linked at compile time.
 
 When the agent self-replicates, built-in tools are carried forward via the
-snapshot archive (core crates include the host binary's wiring).
+snapshot archive (the template carries forward built-in extension wiring).
 
 The agent **cannot** modify built-in extensions at runtime. To change them,
 it must modify the source in the extracted snapshot and recompile.
@@ -421,7 +404,7 @@ depend on a system extension:
 
 use crate::web_fetch_url;
 
-pub fn init(reg: &mut Registry) { /* ... */ }
+pub fn init(reg: &mut ExtensionRegistry) { /* ... */ }
 ```
 
 The resolver walks all modroots to find `web_fetch_url`, regardless of which
@@ -445,7 +428,7 @@ write_target = "project"   # "project" | "session" | "system"
 
 ### Discovery at Startup
 
-`mage-host` startup sequence for extension discovery:
+Startup sequence for extension discovery (in the generated binary):
 
 ```
 1. Detect project root (walk up from CWD)

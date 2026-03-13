@@ -4,74 +4,115 @@ How mage renders the agent session in the terminal.
 
 
 ## Architecture
-
 Append-only log in the primary terminal buffer (no alternate screen).
 Scrollback preserved. The differential renderer (`Renderer`) diffs each
 frame against the previous and repaints only changed rows.
-
 The TUI receives `AgentEvent`s from the agent loop. It does not own the
 agent loop.
 
 
-## Widgets Used (from mage-tui)
+## Core Principle: Widget-Per-Entry
 
-| Widget     | Use                                                        |
-|------------|------------------------------------------------------------|
-| `Renderer` | Frame accumulation, diff rendering, cursor management      |
-| `Text`     | Styled multi-span text with padding, bg fill, word-wrap    |
-| `Markdown` | Streaming incremental markdown with block-level caching    |
-| `HStack`   | Horizontal pane layout for tool blocks (bar | content)     |
-| `Editor`   | Multi-line input with cursor positioning                   |
-
-No raw ANSI in the app layer. All styling through `Style`, `Color`,
-`Padding`, widget APIs.
-
-
-## Blocks
-
-The log is a sequence of `Block` values rendered top-to-bottom.
-Each block is a **stable element** — it is created once and mutated
-in place. The diff renderer detects changes via `Rc::ptr_eq` on
-cached lines, so stable blocks that haven't changed cost nothing.
-
-
-### User Input
+Every element in the conversation log owns a **persistent widget**
+(`Text`, `Markdown`, or a composite struct containing them). Widgets
+cache their rendered `Rc<str>` lines internally. The render pass is a
+trivial loop:
 
 ```rust
-Block::UserInput { text: Text }
+for entry in &mut self.log {
+    r.push_blank();
+    match entry {
+        LogEntry::User(text)      => text.render(r),
+        LogEntry::Assistant(md)   => md.render(r),
+        LogEntry::Tool(tw)        => tw.render(r),
+        LogEntry::Error(text)     => text.render(r),
+    }
+}
 ```
 
-`Text` widget with bold `>` prefix span. Created on input submit,
-never mutated after.
+**No raw ANSI, no `push_line` with format strings, no manual bg fills
+in the app layer.** All styling flows through `Style`, `Color`,
+`Padding`, and widget APIs. The app creates widgets via factory
+functions (`make_user_text`, `make_assistant_md`, etc.) that set the
+theme once; widgets handle their own padding, bg fill, word-wrap,
+and caching.
+
+This matters for three reasons:
+
+1. **Diff efficiency.** Unchanged widgets produce the same `Rc<str>`
+   line pointers. The renderer skips repainting them via `Rc::ptr_eq`.
+2. **Modularity.** Widget creation is separated from rendering. The
+   render loop doesn't know how a `Text` fills its background — it
+   just calls `.render(r)`.
+3. **Testability.** Widgets can be rendered into any `LineSink`
+   (trait), not just the real `Renderer`. Tests can inspect cached
+   lines without a terminal.
 
 
-### Command
+## Widgets (from mage-tui)
+| Widget       | Use                                                         |
+|--------------|-------------------------------------------------------------|
+| `Renderer`   | Frame accumulation, diff rendering, cursor management       |
+| `LineSink`   | Trait — width + push_lines; `Renderer` implements it        |
+| `View`       | Trait — `render(&mut self, &mut impl LineSink)`             |
+| `Text`       | Styled multi-span text with padding, bg fill, word-wrap     |
+| `Markdown`   | Streaming incremental markdown with block-level caching     |
+| `Editor`     | Multi-line input with cursor positioning                    |
+| `HStack`     | Horizontal pane layout for tool blocks (future)             |
+
+## Log Entries
+
+The log is `Vec<LogEntry>`. Each variant owns its widget(s):
 
 ```rust
-Block::Command { input: Text, output: Text }
+enum LogEntry {
+    User(Text),            // Immutable after creation
+    Assistant(Markdown),   // Streamed via .append(delta)
+    Tool(ToolWidget),      // Composite: header Text + optional output Text
+    Error(Text),           // Immutable after creation
+}
 ```
 
-`/` prefixed input. `input` is dim. `output` is whatever the command
-handler produced. Both are stable after creation.
+### User
 
-Commands intercepted by internal handlers (`/quit`, `/clear`, `/model`,
-`/help`) or extension-registered command handlers.
+`Text` with bold style, `BG_USER` background, `Padding::new(1,1,1,1)`.
+Created on submit, never mutated.
 
+### Assistant
 
-### Assistant Message
+`Markdown` with `Padding::new(1,1,1,1)` and `BG_ASSISTANT` background.
+Streams via `markdown.append(delta)` on each `MessageDelta`.
+Block-level caching: only the last incomplete block re-renders.
+
+### Tool
+
+`ToolWidget` — a composite widget holding:
+- `header: Text` — icon + tool name + args summary, with `BG_TOOL` bg
+- `output: Option<Text>` — populated on completion with result text
+
+On `ToolExecStart`, a running `ToolWidget` is created with a `⏵`
+icon. Streaming progress arrives via `ToolExecUpdate` events. On
+`ToolExecEnd`, `complete()` rebuilds the header with `✓`/`✗` icon
+and populates the output text.
 
 ```rust
-Block::AssistantMessage { markdown: Markdown, streaming: bool }
+struct ToolWidget {
+    name: String,
+    header: Text,
+    output: Option<Text>,
+}
 ```
 
-`Markdown` widget with left + right `Padding` and optional bg.
-Streams via `markdown.append(delta)` on each `MessageUpdate`.
-Block-level caching: only last incomplete block re-renders.
-`streaming` flips to false on `MessageEnd`.
+### Error
 
+`Text` with bold red "error:" prefix, `BG_ERROR` background.
+Immutable after creation.
 
-### Tool Invocation
+### Tool Invocation (future: HStack + streaming updates)
 
+The current implementation uses a simple composite `ToolWidget` with
+a header `Text` and optional output `Text`. The aspirational design
+uses `HStack` with a wave-animated bar pane:
 ```rust
 Block::ToolInvocation {
     tool_call_id: String,
@@ -80,410 +121,234 @@ Block::ToolInvocation {
     layout: HStack,           // bar pane (Fixed 1) | content pane (Flex)
     wave: WaveBar,            // animation state
     state: ToolBlockState,
-    live: Option<Box<dyn LiveOutput>>,  // type-erased, polls mailbox + renders
-}
-
-enum ToolBlockState {
-    /// Tool executing. If `live` is Some, the TUI polls and renders it.
-    /// If `live` is None, the TUI shows default progress (name + elapsed).
-    Running,
-    /// Tool finished. Outcome stored for completion rendering.
-    Completed {
-        result: ToolResult,
-        duration: Duration,
-    },
 }
 ```
 
-Uses `HStack` with two panes:
-- `Fixed(1)` — bar pane. One `║` or `│` character per row, color-animated
-  while running, static dim when completed.
-- `Flex` — content pane. The tool's render methods own this entire area.
+Streaming tool progress is delivered via `AgentEvent::ToolExecUpdate`
+events, which carry a `ToolUpdate { content, metadata }`. The TUI can
+use these to update the tool widget's output in real time.
 
-`live` is `Some` only for Custom executions (tier 3). It holds the
-type-erased `LiveOutput` which polls the mailbox and delegates to the
-tool's `render_progress` / `render_complete`. For sync (tier 1) and
-async (tier 2) tools, `live` is `None` and the TUI uses default
-rendering functions directly.
+This is not yet implemented. The current `ToolWidget` is the v1
+simplification that satisfies the widget-per-entry principle.
 
 
-## Tool Trait (Reference)
+## Closure-Based Tools (Reference)
 
-See `DESIGN-TOOL-RENDERING.md` for the full tool execution specification
-including `ToolExecution`, `ToolResult`, builders, and the `Mailbox`.
+See `DESIGN-TOOL-RENDERING.md` for the full tool execution specification.
 
-The `Tool` trait defines metadata, execution, LLM output, and rendering
-in a single interface. The rendering methods are what the TUI calls
-(via `LiveOutput`) each frame:
+Tools are registered as closures via `ExtensionRegistry::tool(schema, closure)`.
+Each tool receives its arguments and a `ToolHandle` for cancellation and
+streaming updates:
 
 ```rust
-pub trait Tool: 'static {
-    /// Accumulated state during execution. Default is String.
-    type State: 'static = String;
-
-    // ── Metadata ────────────────────────────────────────────────
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn parameters(&self) -> &serde_json::Value;
-
-    // ── Execution ───────────────────────────────────────────────
-    fn execute(
-        &self,
-        tool_call_id: &str,
-        params: serde_json::Value,
-        cancel: CancelToken,
-    ) -> ToolExecution<Self::State>;
-
-    // ── LLM output ──────────────────────────────────────────────
-    fn to_result(
-        &self,
-        result: &ToolResult,
-        state: Option<&Self::State>,
-    ) -> ToolContent {
-        result.result().clone()
-    }
-
-    // ── Rendering ───────────────────────────────────────────────
-
-    /// Render in-progress. Only called for Custom (tier 3).
-    fn render_progress(
-        &self,
-        state: Option<&Self::State>,
-        params: &serde_json::Value,
-        elapsed: Duration,
-        r: &mut Renderer,
-        width: u16,
-    ) {
-        default_render_progress(self.name(), params, elapsed, r, width);
-    }
-
-    /// Render on completion.
-    fn render_complete(
-        &self,
-        state: Option<&Self::State>,
-        result: &ToolResult,
-        params: &serde_json::Value,
-        elapsed: Duration,
-        r: &mut Renderer,
-        width: u16,
-    ) {
-        default_render_complete(self.name(), result, params, elapsed, r, width);
-    }
+pub struct RegisteredTool {
+    pub schema: llm::Tool,
+    pub execute: Box<dyn Fn(String, Value, ToolHandle) -> Pin<Box<dyn Future<Output = ToolResult>>>>,
 }
 ```
 
-
-## Type Erasure (TUI-side)
-
-The `Tool` trait has an associated type, so it's not object-safe. The
-registry uses `ErasedTool` + `ToolWrapper<T>` to erase the type (see
-`DESIGN-TOOL-RENDERING.md`). What matters to the TUI is what it
-receives and calls: `ErasedExecution` and `LiveOutput`.
+`ToolHandle` provides per-tool context during execution:
 
 ```rust
-pub enum ErasedExecution {
-    Ready(ToolResult),
-    Running(Pin<Box<dyn Future<Output = ToolResult>>>),
-    Custom {
-        task: Pin<Box<dyn Future<Output = ToolResult>>>,
-        live: Box<dyn LiveOutput>,
-    },
+pub struct ToolHandle {
+    // Check if the tool invocation has been cancelled
+    pub fn is_cancelled(&self) -> bool;
+    pub fn cancel_token(&self) -> CancelToken;
+
+    // Stream progress updates to the TUI
+    pub fn send_update(&self, update: ToolUpdate);
+
+    // Access the loop handle for injecting messages, etc.
+    pub fn loop_handle(&self) -> &LoopHandle;
 }
 ```
 
-`LiveOutput` is the type-erased interface the TUI calls each frame.
-All methods take `&mut self` — the TUI has exclusive ownership.
-No RefCell, no boxed closures.
+The `ToolResult` struct replaces the old enum:
 
 ```rust
-pub(crate) trait LiveOutput {
-    /// Drain the mailbox. Called once per frame before rendering.
-    fn poll(&mut self);
-
-    /// Render in-progress state.
-    fn render_progress(
-        &mut self,
-        params: &serde_json::Value,
-        elapsed: Duration,
-        r: &mut Renderer,
-        width: u16,
-    );
-
-    /// Render completed state.
-    fn render_complete(
-        &mut self,
-        result: &ToolResult,
-        params: &serde_json::Value,
-        elapsed: Duration,
-        r: &mut Renderer,
-        width: u16,
-    );
+pub struct ToolResult {
+    pub content: Vec<llm::UserContent>,
+    pub is_error: bool,
 }
 ```
 
-The concrete bridge: `LiveOutputImpl<T: Tool>` holds `Rc<T>` +
-`Mailbox<T::State>` + `Option<T::State>`. It polls the mailbox into
-`latest` and delegates render calls to the tool.
 
-```rust
-struct LiveOutputImpl<T: Tool> {
-    tool: Rc<T>,
-    mailbox: Mailbox<T::State>,
-    latest: Option<T::State>,
-}
+## Tool Event Flow (TUI-side)
 
-impl<T: Tool> LiveOutput for LiveOutputImpl<T> {
-    fn poll(&mut self) {
-        if let Some(val) = self.mailbox.take() {
-            self.latest = Some(val);
-        }
-    }
+The TUI no longer uses type-erased `LiveOutput` or `Mailbox`. Instead,
+it reacts to `AgentEvent` variants emitted by the agent loop:
 
-    fn render_progress(&mut self, params: &Value, elapsed: Duration, r: &mut Renderer, width: u16) {
-        self.tool.render_progress(self.latest.as_ref(), params, elapsed, r, width);
-    }
+1. **`ToolExecStart { tool_call_id, tool_name, args }`** — create a
+   running `ToolWidget` with `⏵` icon.
+2. **`ToolExecUpdate { tool_call_id, tool_name, update }`** — update
+   the tool widget's output with streaming progress. The `ToolUpdate`
+   carries `content: Vec<UserContent>` and optional `metadata`.
+3. **`ToolExecEnd { tool_call_id, tool_name, result }`** — finalize
+   the widget: rebuild header with `✓`/`✗` icon based on
+   `result.is_error`, populate output from `result.content`.
 
-    fn render_complete(&mut self, result: &ToolResult, params: &Value, elapsed: Duration, r: &mut Renderer, width: u16) {
-        self.tool.render_complete(self.latest.as_ref(), result, params, elapsed, r, width);
-    }
-}
-```
+This is simpler than the old `ErasedExecution`/`LiveOutput` design:
+the TUI is a pure event consumer with no polling or type erasure.
 
 
 ## Rendering Pipeline
-
-Each frame, the app iterates blocks:
+Each frame, the app iterates log entries. Widgets render themselves;
+the app never constructs ANSI strings or calls `push_line` directly.
 
 ```rust
 fn render(&mut self, r: &mut Renderer) {
-    for block in &mut self.blocks {
-        match block {
-            Block::UserInput { text } => {
-                text.render(r);
-                r.push_blank();
-            }
-            Block::Command { input, output } => {
-                input.render(r);
-                output.render(r);
-                r.push_blank();
-            }
-            Block::AssistantMessage { markdown, .. } => {
-                markdown.render(r);
-                r.push_blank();
-            }
-            Block::ToolInvocation { state, layout, wave, live, params, .. } => {
-                let w = r.width() as usize;
-                layout.set_width(w);
-
-                let content_pane = layout.get_mut(CONTENT_PANE);
-                let content_w = content_pane.available_width() as u16;
-                content_pane.clear();
-
-                match state {
-                    ToolBlockState::Running => {
-                        let lines = render_to_lines(|r| {
-                            match live {
-                                Some(live) => {
-                                    live.poll();
-                                    live.render_progress(params, elapsed, r, content_w);
-                                }
-                                None => {
-                                    default_render_progress(name, params, elapsed, r, content_w);
-                                }
-                            }
-                        }, content_w);
-                        for line in &lines {
-                            content_pane.push_line(line.clone());
-                        }
-                    }
-                    ToolBlockState::Completed { result, duration } => {
-                        let lines = render_to_lines(|r| {
-                            match live {
-                                Some(live) => {
-                                    live.render_complete(result, params, *duration, r, content_w);
-                                }
-                                None => {
-                                    default_render_complete(name, result, params, *duration, r, content_w);
-                                }
-                            }
-                        }, content_w);
-                        for line in &lines {
-                            content_pane.push_line(line.clone());
-                        }
-                    }
-                }
-
-                // Bar pane
-                let bar_pane = layout.get_mut(BAR_PANE);
-                bar_pane.clear();
-                let height = content_pane.line_count();
-                let done = matches!(state, ToolBlockState::Completed { .. });
-                for row in 0..height {
-                    if done {
-                        bar_pane.push_line(/* dim "│" */);
-                    } else {
-                        bar_pane.push_line(wave.styled_char(row));
-                    }
-                }
-
-                r.push_lines(layout.compose());
-                r.push_blank();
-            }
+    // Chat log — each entry renders itself.
+    for entry in &mut self.log {
+        r.push_blank();
+        match entry {
+            LogEntry::User(text)      => text.render(r),
+            LogEntry::Assistant(md)   => md.render(r),
+            LogEntry::Tool(tw)        => tw.render(r),
+            LogEntry::Error(text)     => text.render(r),
         }
     }
 
-    if self.awaiting_input {
-        self.editor.render(r);
+    // Thinking indicator (persistent widget, only shown while running).
+    if self.running {
+        r.push_blank();
+        self.thinking.render(r);
     }
+
+    // Input area with border rules.
+    r.push_blank();
+    push_hr(r, FG_BORDER);
+    self.editor.render(r, " ");
+    push_hr(r, FG_BORDER);
+
+    // Status bar (persistent widget, updated on state change).
+    self.status.render(r);
 }
 ```
 
+Chrome elements (thinking indicator, status bar) are also persistent
+`Text` widgets stored on the TUI struct. They are recreated via factory
+functions only when state changes (e.g. `set_running(true)` rebuilds
+both).
 
-### render_to_lines Helper
+### Factory Functions
 
-**Resolved**: tools render into `Renderer` (full widget access). A capture
-helper extracts the accumulated lines.
+Widget creation is separated from rendering via factory functions:
+
+```rust
+fn make_user_text(content: &str) -> Text { ... }    // bold, BG_USER, PAD
+fn make_assistant_md(width: u16) -> Markdown { ... } // BG_ASSISTANT, PAD
+fn make_error_text(message: &str) -> Text { ... }    // bold red prefix, BG_ERROR, PAD
+fn make_status_text(label: &str) -> Text { ... }     // dim, BG_STATUS, PAD_H
+fn make_thinking_text() -> Text { ... }               // dim, BG_STATUS, PAD
+```
+
+Theme colors are constants at the top of `tui.rs`. Changing a color
+changes every widget that uses it.
+
+### LineSink Trait
+
+Widgets render into `impl LineSink` (not `Renderer` directly). This
+allows testing without a terminal and enables nested containers.
+
+```rust
+pub trait LineSink {
+    fn width(&self) -> u16;
+    fn push_lines(&mut self, lines: &[Line]);
+}
+
+impl LineSink for Renderer { ... }
+```
+
+`View` is the matching trait for widgets:
+
+```rust
+pub trait View {
+    fn render(&mut self, sink: &mut impl LineSink);
+}
+```
+
+`Text` implements `View`. `Markdown` currently takes `&mut Renderer`
+directly (it predates `LineSink`); migrating it is a future cleanup.
+
+### render_to_lines Helper (future)
+
+For tool custom rendering, a capture helper will extract lines from a
+throwaway renderer:
 
 ```rust
 fn render_to_lines(f: impl FnOnce(&mut Renderer), width: u16) -> Vec<Line> {
     let mut r = Renderer::new();
     r.begin_frame(width, u16::MAX);
     f(&mut r);
-    std::mem::take(&mut r.lines)  // needs pub(crate) access or a drain method
+    std::mem::take(&mut r.lines)
 }
 ```
-
-Tools get full `Renderer` access — they can use `Text`, `Markdown`, raw
-`push_line`, whatever they need. The capture helper creates a throwaway
-`Renderer`, collects lines, and feeds them into the `Pane`.
 
 
 ## Complete Examples
 
-See `DESIGN-TOOL-RENDERING.md` for tier 1 (sync) and tier 2 (async) examples.
-Those tiers use default rendering and have no TUI-specific code.
+See `DESIGN-TOOL-RENDERING.md` for tool rendering details.
+Tools are closures; rendering tiers are handled by the TUI based on
+`AgentEvent` variants.
 
-### Tier 3: Custom Tool (bash)
+### Example: Bash Tool (closure-based)
 
-This example shows custom `render_progress` / `render_complete` — the
-TUI-relevant rendering code:
+This example shows how a bash tool uses `ToolHandle::send_update()` for
+streaming output, and how the TUI renders the resulting events:
 
 ```rust
-struct BashTool;
-
-struct BashState {
-    command: String,
-    stdout_lines: Vec<String>,
-    exit_code: Option<i32>,
-}
-
-impl Tool for BashTool {
-    type State = BashState;
-
-    fn name(&self) -> &str { "bash" }
-    fn description(&self) -> &str { "Run a shell command" }
-    fn parameters(&self) -> &serde_json::Value { &BASH_SCHEMA }
-
-    fn execute(&self, _id: &str, params: Value, cancel: CancelToken) -> ToolExecution<BashState> {
+// Registration (in an Extension's init method):
+registry.tool(bash_schema(), |tool_call_id, params, handle| {
+    Box::pin(async move {
         let command = params["command"].as_str().unwrap_or("").to_string();
 
-        ToolExecution::custom(|tx| Box::pin(async move {
-            tx.send(BashState {
-                command: command.clone(),
-                stdout_lines: vec![],
-                exit_code: None,
+        let mut child = Command::new("sh")
+            .arg("-c").arg(&command)
+            .stdout(Stdio::piped())
+            .spawn()?;
+
+        let mut lines = Vec::new();
+        while let Some(line) = read_line(&mut child).await {
+            lines.push(line.clone());
+            handle.send_update(ToolUpdate {
+                content: vec![UserContent::Text(lines.join("\n"))],
+                metadata: None,
             });
+        }
 
-            let mut child = Command::new("sh")
-                .arg("-c").arg(&command)
-                .stdout(Stdio::piped())
-                .spawn()?;
-
-            let mut lines = Vec::new();
-            while let Some(line) = read_line(&mut child).await {
-                lines.push(line.clone());
-                tx.send(BashState {
-                    command: command.clone(),
-                    stdout_lines: lines.clone(),
-                    exit_code: None,
-                });
-            }
-
-            let code = child.wait().await?.code().unwrap_or(-1);
-            if code == 0 {
-                ToolResult::success(lines.join("\n"))
+        let code = child.wait().await?.code().unwrap_or(-1);
+        let output = lines.join("\n");
+        ToolResult {
+            content: vec![UserContent::Text(if code == 0 {
+                output
             } else {
-                ToolResult::failure(format!("exit code {code}\n{}", lines.join("\n")))
-            }
-        }))
-    }
-
-    fn render_progress(
-        &self,
-        state: Option<&BashState>,
-        _params: &Value,
-        elapsed: Duration,
-        r: &mut Renderer,
-        width: u16,
-    ) {
-        if let Some(state) = state {
-            let mut title = Text::empty();
-            title.push("bash", Style::new().bold());
-            title.push(&format!("  {}", state.command), Style::new().dim());
-            title.push(&format!("  {:.1}s", elapsed.as_secs_f32()), Style::new().dim());
-            title.render(r);
-
-            let show = state.stdout_lines.len().min(10);
-            for line in &state.stdout_lines[state.stdout_lines.len() - show..] {
-                r.push_line(line.as_str());
-            }
-            if state.stdout_lines.len() > 10 {
-                Text::new(format!("… ({} more)", state.stdout_lines.len() - 10))
-                    .style(Style::new().dim())
-                    .render(r);
-            }
-        } else {
-            default_render_progress(self.name(), _params, elapsed, r, width);
+                format!("exit code {code}\n{output}")
+            })],
+            is_error: code != 0,
         }
+    })
+});
+```
+
+The TUI handles rendering based on the event stream:
+
+```rust
+// TUI event handling:
+AgentEvent::ToolExecStart { tool_call_id, tool_name, args } => {
+    // Create running ToolWidget with ⏵ icon
+    let tw = ToolWidget::new_running(&tool_name, &args);
+    self.log.push(LogEntry::Tool(tw));
+}
+AgentEvent::ToolExecUpdate { tool_call_id, update, .. } => {
+    // Update widget output with streaming content
+    if let Some(tw) = self.find_tool_widget(&tool_call_id) {
+        tw.update_output(&update.content);
     }
-
-    fn render_complete(
-        &self,
-        state: Option<&BashState>,
-        result: &ToolResult,
-        _params: &Value,
-        elapsed: Duration,
-        r: &mut Renderer,
-        width: u16,
-    ) {
-        let command = state.map(|s| s.command.as_str()).unwrap_or("?");
-
-        let mut title = Text::empty();
-        title.push("bash", Style::new().bold());
-        title.push(&format!("  {command}"), Style::new().dim());
-        title.push(&format!("  {:.1}s", elapsed.as_secs_f32()), Style::new().dim());
-        if result.is_error() {
-            title.set_bg(Some(Color::Rgb(50, 20, 20)));
-        } else {
-            title.set_bg(Some(Color::Rgb(20, 40, 20)));
-        }
-        title.render(r);
-
-        if let Some(state) = state {
-            let show = state.stdout_lines.len().min(20);
-            for line in &state.stdout_lines[state.stdout_lines.len() - show..] {
-                r.push_line(line.as_str());
-            }
-            if state.stdout_lines.len() > 20 {
-                Text::new(format!("… ({} more)", state.stdout_lines.len() - 20))
-                    .style(Style::new().dim())
-                    .render(r);
-            }
-        }
-    }
-
-    fn to_result(&self, result: &ToolResult, _state: Option<&BashState>) -> ToolContent {
-        result.result().clone()
+}
+AgentEvent::ToolExecEnd { tool_call_id, result, .. } => {
+    // Finalize: ✓/✗ icon, populate output from result.content
+    if let Some(tw) = self.find_tool_widget(&tool_call_id) {
+        tw.complete(&result);
     }
 }
 ```

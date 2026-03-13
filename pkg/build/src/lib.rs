@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-/// Returns the default `.mr` application root directory for the current user.
+/// Returns the default `.mage` application root directory for the current user.
 #[must_use]
 pub fn default_approot() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".mr")
+        .join(".mage")
 }
 
 pub mod bundle;

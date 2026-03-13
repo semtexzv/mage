@@ -36,6 +36,8 @@ pub(crate) struct MdColors {
     pub quote_border: Color,
     pub hr: Color,
     pub list_bullet: Color,
+    /// Default body text color (None = terminal default).
+    pub base_fg: Option<Color>,
 }
 impl Default for MdColors {
     fn default() -> Self {
@@ -50,6 +52,7 @@ impl Default for MdColors {
             quote_border: Color::Green,
             hr: Color::Ansi256(245),
             list_bullet: Color::Cyan,
+            base_fg: None,
         }
     }
 }
@@ -119,6 +122,7 @@ impl Markdown {
             quote_border: theme.md_quote_border,
             hr: theme.md_hr,
             list_bullet: theme.md_list_bullet,
+            base_fg: theme.text,
         };
         // Invalidate cache if colors changed.
         if new != self.colors {
@@ -996,6 +1000,11 @@ impl<'s> Ctx<'s> {
             let qt_on = qt_style.to_sgr();
             let qt_off = Style::NONE.transition_from(&qt_style);
             self.out.push(Rc::from(format!("{prefix}{qt_on}{text}{qt_off}").as_str()));
+        } else if let Some(fg) = self.colors.base_fg {
+            let base = Style { fg: Some(fg), ..Style::NONE };
+            let on = base.to_sgr();
+            let off = Style::NONE.transition_from(&base);
+            self.out.push(Rc::from(format!("{on}{text}{off}").as_str()));
         } else {
             self.out.push(Rc::from(text));
         }

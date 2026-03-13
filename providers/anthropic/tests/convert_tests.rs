@@ -15,7 +15,7 @@ fn test_model() -> Model {
         input: vec![],
         cost: ModelCost::default(),
         context_window: 200_000,
-        max_tokens: 8192,
+        max_out: 8192,
         headers: None,
     }
 }
@@ -28,7 +28,6 @@ fn build_request_body_basic() {
         messages: vec![
             Message::User(UserMessage {
                 content: UserMessageContent::Text("Hello".into()),
-                timestamp: 0,
             }),
         ],
         tools: None,
@@ -72,13 +71,11 @@ fn tool_result_batching() {
                     id: "call1".into(),
                     name: "read".into(),
                     arguments: json!({"path": "/tmp"}),
-                    thought_signature: None,
                 },
                 ContentBlock::ToolCall {
                     id: "call2".into(),
                     name: "write".into(),
                     arguments: json!({"path": "/tmp/out"}),
-                    thought_signature: None,
                 },
             ],
             api: Str::new(),
@@ -87,7 +84,6 @@ fn tool_result_batching() {
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
             error_message: None,
-            timestamp: 0,
         }),
         Message::ToolResult(ToolResultMessage {
             tool_call_id: "call1".into(),
@@ -95,7 +91,6 @@ fn tool_result_batching() {
             content: vec![UserContent::Text { text: "file contents".into() }],
             details: None,
             is_error: false,
-            timestamp: 0,
         }),
         Message::ToolResult(ToolResultMessage {
             tool_call_id: "call2".into(),
@@ -103,7 +98,6 @@ fn tool_result_batching() {
             content: vec![UserContent::Text { text: "ok".into() }],
             details: None,
             is_error: false,
-            timestamp: 0,
         }),
     ];
 

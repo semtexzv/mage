@@ -1,350 +1,506 @@
 //! Extension system.
 //!
-//! An **extension** is a unit of functionality that plugs into the agent loop.
-//! It can observe lifecycle events, intercept decisions, and register tools
-//! and providers during initialization.
+//! Extensions hook into agent lifecycle events, register tools and providers,
+//! and interact with the loop via [`ExtensionContext`] and [`LoopHandle`].
 //!
-//! ## Layered init
+//! ## Dual access pattern
 //!
-//! 1. **Global**: `ExtensionFactory` is registered once at process startup.
-//!    It's a callback that creates a fresh `Box<dyn Extension>` for each
-//!    agent loop instance.
-//!
-//! 2. **Per-agent**: `Extension::init(&mut self, reg)` is called when an
-//!    agent loop starts. The extension registers tools and providers into
-//!    the `Registry`.
-//!
-//! ## State ownership
-//!
-//! Extensions own their state via `&mut self`. If an extension needs shared
-//! state (e.g. across tools it registers), that's the extension's
-//! responsibility — use `Rc<RefCell<>>` internally. The framework doesn't
-//! impose a sharing model.
+//! [`ExtensionContext`] provides direct mutable references for synchronous work
+//! during a callback. For async work that outlives the callback (e.g. a network
+//! call that later injects a message), extract a [`LoopHandle`] — it is `Clone`
+//! and communicates back over an internal channel.
 //!
 //! ## Hook dispatch
 //!
-//! During hook dispatch, extensions are temporarily removed from
-//! `AgentSession.exts` via `mem::take`. Hooks receive `&mut AgentSession`
-//! with `exts` empty. This avoids borrow conflicts while giving hooks
-//! full mutable access to session state, inject queue, etc.
+//! All hooks are `async` and receive `&mut ExtensionContext<'_>`. Hooks that
+//! participate in decisions return `Option<ResultStruct>` — `None` means "no
+//! opinion", `Some(result)` means "I want to modify this". Extensions are
+//! iterated in order; each sees the output of the previous.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 
+use async_trait::async_trait;
 use refstr::Str;
 
-use llm::{AssistantMessageEvent, ToolResultMessage, UserContent, Model};
+use llm::{CancelToken, Model};
 
-use crate::session::AgentSession;
-use crate::tool::{ErasedTool, Tool, ToolResult, erase_tool};
-use crate::types::Message;
+use crate::types::{Message, ToolResult, ToolUpdate};
 
 // ---------------------------------------------------------------------------
-// Disposition — what a decision hook returns
+// LoopCommand / LoopHandle — command channel into the loop
 // ---------------------------------------------------------------------------
 
+/// Commands sent to the agent loop via [`LoopHandle`].
 #[derive(Debug)]
-pub enum Disposition<T = ()> {
-    /// No opinion. Continue to next hook.
-    Propagate,
-    /// Block the operation.
-    Block { reason: Str },
-    /// Return a value (amendment).
-    Value(T),
+pub enum LoopCommand {
+    InjectMessage(Message),
+    SteerMessage(Message),
+    FollowUpMessage(Message),
+    Abort,
+    Shutdown,
+    SetModel(Model),
 }
 
-impl<T> Disposition<T> {
-    pub fn is_block(&self) -> bool {
-        matches!(self, Self::Block { .. })
+/// Lightweight, cloneable handle to the agent loop.
+///
+/// Use to send commands from extension callbacks or spawned tasks.
+/// Methods are fire-and-forget (silently drop if the loop has shut down).
+#[derive(Clone)]
+pub struct LoopHandle {
+    tx: llm::channel::Sender<LoopCommand>,
+}
+
+impl LoopHandle {
+    pub fn inject(&self, msg: Message) {
+        let _ = self.tx.send(LoopCommand::InjectMessage(msg));
+    }
+    pub fn steer(&self, msg: Message) {
+        let _ = self.tx.send(LoopCommand::SteerMessage(msg));
+    }
+    pub fn follow_up(&self, msg: Message) {
+        let _ = self.tx.send(LoopCommand::FollowUpMessage(msg));
+    }
+    pub fn abort(&self) {
+        let _ = self.tx.send(LoopCommand::Abort);
+    }
+    pub fn shutdown(&self) {
+        let _ = self.tx.send(LoopCommand::Shutdown);
+    }
+    pub fn set_model(&self, model: Model) {
+        let _ = self.tx.send(LoopCommand::SetModel(model));
     }
 }
 
-impl<T> Default for Disposition<T> {
+pub fn loop_handle_pair() -> (LoopHandle, llm::channel::Receiver<LoopCommand>) {
+    let (tx, rx) = llm::channel::channel();
+    (LoopHandle { tx }, rx)
+}
+
+// ---------------------------------------------------------------------------
+// ToolHandle — per-tool-call handle for cancellation and progress
+// ---------------------------------------------------------------------------
+
+/// Handle given to a tool during execution.
+///
+/// Provides cancellation awareness, progress streaming, and loop access.
+/// Created per tool call; updates are drained by the loop's `execute_tool`.
+pub struct ToolHandle {
+    pub tool_call_id: String,
+    cancel: CancelToken,
+    update_tx: tokio::sync::mpsc::UnboundedSender<ToolUpdate>,
+    loop_handle: LoopHandle,
+}
+
+impl ToolHandle {
+    pub(crate) fn new(
+        tool_call_id: String,
+        cancel: CancelToken,
+        update_tx: tokio::sync::mpsc::UnboundedSender<ToolUpdate>,
+        loop_handle: LoopHandle,
+    ) -> Self {
+        Self {
+            tool_call_id,
+            cancel,
+            update_tx,
+            loop_handle,
+        }
+    }
+
+    /// Sync cancellation check — call at yield points in long-running tools.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// The per-tool cancellation token, if the tool needs to pass it deeper.
+    pub fn cancel_token(&self) -> &CancelToken {
+        &self.cancel
+    }
+
+    /// Send a progress update to the UI. Fire-and-forget (unbounded).
+    pub fn send_update(&self, update: ToolUpdate) {
+        let _ = self.update_tx.send(update);
+    }
+
+    /// Access the loop handle for injecting messages, steering, etc.
+    pub fn loop_handle(&self) -> &LoopHandle {
+        &self.loop_handle
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RegisteredTool — closure-based tool registration
+// ---------------------------------------------------------------------------
+
+/// A tool registered by an extension during init.
+///
+/// Instead of a trait, tools are closures:
+/// `Fn(call_id, args, handle) -> Future<Output = ToolResult>`
+pub struct RegisteredTool {
+    pub schema: llm::Tool,
+    pub execute: Box<
+        dyn Fn(String, serde_json::Value, ToolHandle) -> Pin<Box<dyn Future<Output = ToolResult>>>,
+    >,
+}
+
+// ---------------------------------------------------------------------------
+// Queues — message injection timing
+// ---------------------------------------------------------------------------
+
+pub struct Queues {
+    /// Messages injected before the next LLM call.
+    pub inject: VecDeque<Message>,
+    /// Messages that interrupt current tool execution.
+    pub steering: VecDeque<Message>,
+    /// Messages queued for after the current turn.
+    pub followup: VecDeque<Message>,
+}
+
+impl Queues {
+    pub fn new() -> Self {
+        Self {
+            inject: VecDeque::new(),
+            steering: VecDeque::new(),
+            followup: VecDeque::new(),
+        }
+    }
+}
+
+impl Default for Queues {
     fn default() -> Self {
-        Self::Propagate
+        Self::new()
     }
 }
 
 // ---------------------------------------------------------------------------
-// Amendment types — the T in Disposition<T>
+// LoopState — all state that extension callbacks can borrow
 // ---------------------------------------------------------------------------
 
-pub struct ToolResultAmend {
-    pub content: Option<Vec<UserContent>>,
-    pub is_error: Option<bool>,
+/// Stored as a separate struct so the borrow checker allows simultaneous
+/// `&mut LoopState` + `&mut Vec<Box<dyn Extension>>`.
+pub struct LoopState {
+    pub messages: Vec<Message>,
+    pub system_prompt: String,
+    pub model: Model,
+    pub options: llm::StreamOptions,
+    /// Tool schemas for LLM requests (derived from registered tools).
+    pub tool_schemas: Vec<llm::Tool>,
+    pub queues: Queues,
+    pub handle: LoopHandle,
+    pub cancel: CancelToken,
 }
 
-pub struct InputAmend {
-    pub text: String,
-    /// If true, input was fully handled — don't send to agent.
-    pub handled: bool,
+impl LoopState {
+    /// Build an [`ExtensionContext`] borrowing from this state.
+    pub fn ext_ctx(&mut self) -> ExtensionContext<'_> {
+        ExtensionContext {
+            messages: &self.messages,
+            system_prompt: &self.system_prompt,
+            model: &self.model,
+            queues: &mut self.queues,
+            handle: self.handle.clone(),
+        }
+    }
+
+    /// Convert messages to LLM messages, filtering out ephemeral entries.
+    pub fn to_llm_messages(&self) -> Vec<llm::Message> {
+        self.messages
+            .iter()
+            .filter(|m| !m.ephemeral)
+            .map(|m| m.to_llm())
+            .collect()
+    }
 }
 
-pub struct ContextAmend {
+// ---------------------------------------------------------------------------
+// ExtensionContext — narrow borrow passed to every hook
+// ---------------------------------------------------------------------------
+
+/// Context passed to every extension callback.
+///
+/// Provides read access to conversation state and write access to queues.
+/// Extract a [`LoopHandle`] for async work that outlives the callback.
+pub struct ExtensionContext<'a> {
+    pub messages: &'a [Message],
+    pub system_prompt: &'a str,
+    pub model: &'a Model,
+    queues: &'a mut Queues,
+    handle: LoopHandle,
+}
+
+impl ExtensionContext<'_> {
+    /// Extract a [`LoopHandle`] for use in async tasks.
+    pub fn handle(&self) -> LoopHandle {
+        self.handle.clone()
+    }
+
+    /// Inject a message before the next LLM call.
+    pub fn inject(&mut self, msg: Message) {
+        self.queues.inject.push_back(msg);
+    }
+
+    /// Steer: interrupt current tool execution.
+    pub fn steer(&mut self, msg: Message) {
+        self.queues.steering.push_back(msg);
+    }
+
+    /// Queue a follow-up message for after the current turn.
+    pub fn follow_up(&mut self, msg: Message) {
+        self.queues.followup.push_back(msg);
+    }
+
+    pub fn has_pending_messages(&self) -> bool {
+        !self.queues.inject.is_empty()
+            || !self.queues.steering.is_empty()
+            || !self.queues.followup.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event structs — passed to hooks
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct AgentEndEvent {
     pub messages: Vec<Message>,
 }
 
-pub struct CompactAmend {
-    pub summary: Str,
-    pub first_kept_entry_id: Str,
+#[derive(Debug, Clone)]
+pub struct TurnStartEvent {
+    pub turn_index: usize,
 }
 
-pub struct BashAmend {
-    pub output: String,
-    pub exit_code: i32,
+#[derive(Debug, Clone)]
+pub struct TurnEndEvent {
+    pub turn_index: usize,
+    pub message: Message,
+    pub tool_results: Vec<ToolResult>,
 }
 
-// ---------------------------------------------------------------------------
-// Arg structs — references passed to hooks
-// ---------------------------------------------------------------------------
-
-pub struct ToolCallArgs<'a> {
-    pub name: &'a str,
-    pub id: &'a str,
-    pub args: &'a serde_json::Value,
+#[derive(Debug, Clone)]
+pub struct ContextEvent {
+    pub messages: Vec<Message>,
 }
 
-pub struct ToolResultArgs<'a> {
-    pub name: &'a str,
-    pub id: &'a str,
-    pub result: &'a ToolResult,
-    pub is_error: bool,
+#[derive(Debug, Clone)]
+pub struct BeforeAgentStartEvent {
+    pub prompt: String,
+    pub system_prompt: String,
 }
 
-pub struct TurnEndArgs<'a> {
-    pub message: &'a Message,
-    pub tool_results: &'a [ToolResultMessage],
+#[derive(Debug, Clone)]
+pub struct ToolCallEvent {
+    pub tool_call_id: Str,
+    pub tool_name: Str,
+    pub arguments: serde_json::Value,
 }
 
-pub struct MessageArgs<'a> {
-    pub message: &'a Message,
+#[derive(Debug, Clone)]
+pub struct ToolResultEvent {
+    pub tool_call_id: Str,
+    pub tool_name: Str,
+    pub result: ToolResult,
 }
 
-pub struct MessageDeltaArgs<'a> {
-    pub event: &'a AssistantMessageEvent,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputSource {
+    Interactive,
+    Rpc,
+    Extension,
 }
 
-pub struct ToolExecStartArgs<'a> {
-    pub name: &'a str,
-    pub args: &'a serde_json::Value,
-}
-
-pub struct ToolExecEndArgs<'a> {
-    pub name: &'a str,
-    pub result: &'a ToolResult,
-    pub is_error: bool,
-}
-
-pub struct BeforeForkArgs<'a> {
-    pub entry_id: &'a str,
-}
-
-pub struct UserBashArgs<'a> {
-    pub command: &'a str,
-}
-
-pub struct AgentEndArgs<'a> {
-    pub messages: &'a [Message],
-}
-
-pub struct ModelSelectArgs<'a> {
-    pub model: &'a Model,
+#[derive(Debug, Clone)]
+pub struct InputEvent {
+    pub text: String,
+    pub source: InputSource,
 }
 
 // ---------------------------------------------------------------------------
-// Registry — passed to Extension::init for tool/provider registration
+// Result structs — returned by decision hooks
 // ---------------------------------------------------------------------------
 
-/// Mutable registry passed to `Extension::init`. Extensions use it to
-/// register tools and providers into the agent.
-pub struct Registry<'a> {
-    pub(crate) tools: &'a mut Vec<Box<dyn ErasedTool>>,
-    pub(crate) providers: &'a mut Vec<(Str, std::rc::Rc<dyn llm::Provider>)>,
+#[derive(Debug, Clone, Default)]
+pub struct ContextResult {
+    pub messages: Option<Vec<Message>>,
 }
-impl<'a> Registry<'a> {
-    /// Register a tool. Wraps the concrete `Tool` impl into type-erased storage.
-    pub fn tool(&mut self, tool: impl Tool) {
-        self.tools.push(erase_tool(tool));
-    }
-    /// Register a provider under an API name (e.g. `"anthropic"`).
-    /// The agent resolves the provider from `model.api`.
-    pub fn provider(&mut self, api: impl Into<Str>, provider: impl llm::Provider + 'static) {
-        self.providers.push((api.into(), std::rc::Rc::new(provider)));
-    }
+
+#[derive(Debug, Clone, Default)]
+pub struct BeforeAgentStartResult {
+    pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallResult {
+    pub block: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolResultResult {
+    pub content: Option<Vec<llm::UserContent>>,
+    pub is_error: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub enum InputResult {
+    Continue,
+    Transform { text: String },
+    Handled,
 }
 
 // ---------------------------------------------------------------------------
 // Extension trait
 // ---------------------------------------------------------------------------
 
-/// Async return type for decision hooks. One alloc per invocation.
-pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
-
-/// An extension is a unit of functionality that plugs into the agent loop.
+/// An extension hooks into the agent loop lifecycle.
 ///
-/// It has two phases:
-/// - `init`: called once per agent-loop instance, registers tools/providers.
-/// - Hook methods: called during the agent loop at interception points.
+/// All hooks are async and receive `&mut ExtensionContext<'_>`.
+/// Decision hooks return `Option<ResultStruct>` — `None` = no opinion.
 ///
-/// `&mut self` provides owned state. If an extension needs shared state
-/// across its tools, it manages that internally (e.g. `Rc<RefCell<>>`).
-///
-/// **Observe hooks** are sync. **Decision hooks** return `HookFuture`.
-///
-/// During hook dispatch, extensions are temporarily removed from
-/// `session.exts` via `mem::take`. Hooks receive `&mut AgentSession`
-/// with `exts` empty.
+/// `async_trait(?Send)` — everything runs on a single-threaded runtime.
 #[allow(unused_variables)]
+#[async_trait(?Send)]
 pub trait Extension {
-    /// Called once when the agent loop starts. Register tools, providers,
-    /// and perform any setup.
-    fn init(&mut self, registry: &mut Registry) {}
-
-    // ===================================================================
-    // Observe — sync, fire-and-forget
-    // ===================================================================
-
-    fn on_agent_start(&mut self, session: &mut AgentSession) {}
-    fn on_agent_end(&mut self, args: &AgentEndArgs, session: &mut AgentSession) {}
-    fn on_turn_start(&mut self, session: &mut AgentSession) {}
-    fn on_turn_end(&mut self, args: &TurnEndArgs, session: &mut AgentSession) {}
-    fn on_model_select(&mut self, args: &ModelSelectArgs, session: &mut AgentSession) {}
-    fn on_session_start(&mut self, session: &mut AgentSession) {}
-    fn on_session_switch(&mut self, session: &mut AgentSession) {}
-    fn on_session_shutdown(&mut self, session: &mut AgentSession) {}
-    fn on_message_start(&mut self, args: &MessageArgs, session: &mut AgentSession) {}
-    fn on_message_delta(&mut self, args: &MessageDeltaArgs, session: &mut AgentSession) {}
-    fn on_message_end(&mut self, args: &MessageArgs, session: &mut AgentSession) {}
-    fn on_tool_exec_start(&mut self, args: &ToolExecStartArgs, session: &mut AgentSession) {}
-    fn on_tool_exec_end(&mut self, args: &ToolExecEndArgs, session: &mut AgentSession) {}
-
-    // ===================================================================
-    // Decision — async, return Disposition<T>
-    // ===================================================================
-
-    fn on_tool_call<'a>(
-        &'a mut self,
-        args: &'a ToolCallArgs<'a>,
-        session: &'a mut AgentSession,
-    ) -> HookFuture<'a, Disposition> {
-        Box::pin(async { Disposition::Propagate })
-    }
-    fn on_tool_result<'a>(
-        &'a mut self,
-        args: &'a ToolResultArgs<'a>,
-        session: &'a mut AgentSession,
-    ) -> HookFuture<'a, Disposition<ToolResultAmend>> {
-        Box::pin(async { Disposition::Propagate })
+    fn name(&self) -> &str {
+        "unnamed"
     }
 
-    fn on_input<'a>(
-        &'a mut self,
-        text: &'a str,
-        session: &'a mut AgentSession,
-    ) -> HookFuture<'a, Disposition<InputAmend>> {
-        Box::pin(async { Disposition::Propagate })
+    /// Called once during setup. Register tools, providers, and perform setup.
+    fn init(&mut self, registry: &mut ExtensionRegistry) {}
+
+    // === Agent lifecycle ===
+
+    async fn on_agent_start(&mut self, ctx: &mut ExtensionContext<'_>) {}
+
+    async fn on_agent_end(&mut self, event: &AgentEndEvent, ctx: &mut ExtensionContext<'_>) {}
+
+    /// Modify the system prompt before the loop runs.
+    async fn on_before_agent_start(
+        &mut self,
+        event: &BeforeAgentStartEvent,
+        ctx: &mut ExtensionContext<'_>,
+    ) -> Option<BeforeAgentStartResult> {
+        None
     }
 
-    fn on_context<'a>(
-        &'a mut self,
-        messages: &'a [Message],
-        session: &'a mut AgentSession,
-    ) -> HookFuture<'a, Disposition<ContextAmend>> {
-        Box::pin(async { Disposition::Propagate })
+    // === Turn lifecycle ===
+
+    async fn on_turn_start(&mut self, event: &TurnStartEvent, ctx: &mut ExtensionContext<'_>) {}
+
+    async fn on_turn_end(&mut self, event: &TurnEndEvent, ctx: &mut ExtensionContext<'_>) {}
+
+    /// Transform messages before sending to the LLM.
+    async fn on_context(
+        &mut self,
+        event: &ContextEvent,
+        ctx: &mut ExtensionContext<'_>,
+    ) -> Option<ContextResult> {
+        None
     }
 
-    fn on_before_switch<'a>(
-        &'a mut self,
-        session: &'a mut AgentSession,
-    ) -> HookFuture<'a, Disposition> {
-        Box::pin(async { Disposition::Propagate })
+    // === Message streaming ===
+
+    async fn on_message_delta(
+        &mut self,
+        event: &llm::AssistantMessageEvent,
+        ctx: &mut ExtensionContext<'_>,
+    ) {
     }
 
-    fn on_before_fork<'a>(
-        &'a mut self,
-        args: &'a BeforeForkArgs<'a>,
-        session: &'a mut AgentSession,
-    ) -> HookFuture<'a, Disposition> {
-        Box::pin(async { Disposition::Propagate })
+    // === Tools ===
+
+    /// Return `Some(ToolCallResult { block: true, .. })` to prevent execution.
+    async fn on_tool_call(
+        &mut self,
+        event: &ToolCallEvent,
+        ctx: &mut ExtensionContext<'_>,
+    ) -> Option<ToolCallResult> {
+        None
     }
 
-    fn on_before_compact<'a>(
-        &'a mut self,
-        session: &'a mut AgentSession,
-    ) -> HookFuture<'a, Disposition<CompactAmend>> {
-        Box::pin(async { Disposition::Propagate })
+    /// Return `Some` to modify the tool result.
+    async fn on_tool_result(
+        &mut self,
+        event: &ToolResultEvent,
+        ctx: &mut ExtensionContext<'_>,
+    ) -> Option<ToolResultResult> {
+        None
     }
 
-    fn on_user_bash<'a>(
-        &'a mut self,
-        args: &'a UserBashArgs<'a>,
-        session: &'a mut AgentSession,
-    ) -> HookFuture<'a, Disposition<BashAmend>> {
-        Box::pin(async { Disposition::Propagate })
+    // === Input ===
+
+    /// Return `Handled` to consume input, `Transform` to rewrite it.
+    async fn on_input(
+        &mut self,
+        event: &InputEvent,
+        ctx: &mut ExtensionContext<'_>,
+    ) -> Option<InputResult> {
+        None
     }
 }
 
 // ---------------------------------------------------------------------------
-// ExtensionFactory — global registration
+// ExtensionFactory
 // ---------------------------------------------------------------------------
 
-/// A factory that creates a fresh `Extension` instance for each agent loop.
-///
-/// Registered once at process startup. Called each time a new agent loop
-/// (or sub-agent) starts, so each gets its own extension state.
-///
-/// `Rc<dyn Fn>` so it's cheaply clonable — needed for `AgentInit` which is `Clone`.
-pub type ExtensionFactory = std::rc::Rc<dyn Fn() -> Box<dyn Extension>>;
+/// A factory that creates a fresh Extension instance for each agent loop.
+pub type ExtensionFactory = Box<dyn Fn() -> Box<dyn Extension>>;
 
 // ---------------------------------------------------------------------------
-// FactoryRegistry — process-level extension factory storage
+// ExtensionRegistry — passed to Extension::init
 // ---------------------------------------------------------------------------
 
-/// Process-level registry of extension factories.
-///
-/// Register factories at startup. When an agent loop starts, call
-/// [`FactoryRegistry::create_all`] to get fresh extension instances.
-///
-/// Not `Send`/`Sync` — single-threaded runtime.
-pub struct FactoryRegistry {
-    factories: Vec<ExtensionFactory>,
+/// Registry for tool and provider registration during init.
+pub struct ExtensionRegistry {
+    pub(crate) tools: Vec<RegisteredTool>,
+    pub(crate) providers: Vec<(Str, Rc<dyn llm::Provider>)>,
 }
 
-impl FactoryRegistry {
-    pub const fn new() -> Self {
-        Self { factories: Vec::new() }
+impl ExtensionRegistry {
+    pub fn new() -> Self {
+        Self {
+            tools: Vec::new(),
+            providers: Vec::new(),
+        }
     }
 
-    /// Register a factory. Called once at process startup per extension type.
-    pub fn register(&mut self, factory: impl Fn() -> Box<dyn Extension> + 'static) {
-        self.factories.push(std::rc::Rc::new(factory));
+    /// Register a tool with a closure.
+    pub fn tool<F, Fut>(&mut self, schema: llm::Tool, execute: F)
+    where
+        F: Fn(String, serde_json::Value, ToolHandle) -> Fut + 'static,
+        Fut: Future<Output = ToolResult> + 'static,
+    {
+        self.tools.push(RegisteredTool {
+            schema,
+            execute: Box::new(move |id, args, handle| Box::pin(execute(id, args, handle))),
+        });
     }
 
-    /// Create fresh extension instances from all registered factories.
-    /// Called once per agent loop / sub-agent.
-    pub fn create_all(&self) -> Vec<Box<dyn Extension>> {
-        self.factories.iter().map(|f| f()).collect()
-    }
-
-    /// Clone the factory list. Since factories are `Rc<dyn Fn>`, this is cheap.
-    /// Used by `AgentBuilder::ext_from_registry` to embed factories into `AgentInit`.
-    pub fn clone_factories(&self) -> Vec<ExtensionFactory> {
-        self.factories.clone()
-    }
-
-    /// Number of registered factories.
-    pub fn len(&self) -> usize {
-        self.factories.len()
-    }
-
-    /// Returns `true` if no factories are registered.
-    pub fn is_empty(&self) -> bool {
-        self.factories.is_empty()
+    /// Register a provider under an API name.
+    pub fn provider(&mut self, api: impl Into<Str>, provider: impl llm::Provider + 'static) {
+        self.providers.push((api.into(), Rc::new(provider)));
     }
 }
 
-impl Default for FactoryRegistry {
+impl Default for ExtensionRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// init_extensions
+// ---------------------------------------------------------------------------
+
+/// Initialize extensions: call init on each, collect tools and providers.
+pub fn init_extensions(
+    extensions: &mut [Box<dyn Extension>],
+) -> (Vec<RegisteredTool>, Vec<(Str, Rc<dyn llm::Provider>)>) {
+    let mut registry = ExtensionRegistry::new();
+    for ext in extensions.iter_mut() {
+        ext.init(&mut registry);
+    }
+    (registry.tools, registry.providers)
 }

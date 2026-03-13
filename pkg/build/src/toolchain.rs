@@ -169,8 +169,8 @@ impl Toolchain {
     }
 
     /// Attempts to load the toolchain from the standard cache directory for a given version.
-    /// Uses `~/.mr/toolchains/` by default. If the toolchain doesn't exist, it will NOT download it.
-    /// Use `ToolchainDownloader` to download it first.
+    /// Uses `~/.mage/toolchains/` by default. If the toolchain doesn't exist, it will NOT download it.
+    /// The toolchain must already exist in the cache directory.
     ///
     /// # Errors
     /// Returns an error if the toolchain is not found in the cache or the sysroot is invalid.

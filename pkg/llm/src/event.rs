@@ -49,7 +49,6 @@ pub fn apply_event(msg: &mut AssistantMessage, event: &AssistantMessageEvent) {
         AssistantMessageEvent::TextStart { .. } => {
             msg.content.push(ContentBlock::Text {
                 text: Str::new(),
-                text_signature: None,
             });
         }
         AssistantMessageEvent::TextDelta { content_index, delta } => {
@@ -73,7 +72,6 @@ pub fn apply_event(msg: &mut AssistantMessage, event: &AssistantMessageEvent) {
                 id: id.clone(),
                 name: name.clone(),
                 arguments: serde_json::Value::Null,
-                thought_signature: None,
             });
         }
         AssistantMessageEvent::ToolCallDelta { .. } => {

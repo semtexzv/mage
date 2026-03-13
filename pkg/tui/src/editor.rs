@@ -30,7 +30,7 @@
 use crate::overlay::{SelectAction, SelectItem, SelectList};
 use crate::ansi::{visible_width, RESET};
 use crate::renderer::Renderer;
-use crate::style::{Color, Theme};
+use crate::style::{Color, Style, Theme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 
@@ -79,10 +79,10 @@ fn pill_index(c: char) -> usize {
 }
 
 fn fg(c: Color) -> String {
-    format!("\x1b[{}m", c.fg_code())
+    Style::new().fg(c).to_sgr()
 }
 fn bg_sgr(c: Color) -> String {
-    format!("\x1b[{}m", c.bg_code())
+    Style::new().bg(c).to_sgr()
 }
 
 fn render_pill(label: &str, pill_bg: Color, pill_fg: Color) -> String {
@@ -318,6 +318,8 @@ struct ActiveOverlay {
     trigger_line: usize,
     /// The column where the trigger text starts (e.g. where `/` was typed).
     trigger_col: usize,
+    /// Whether this overlay was opened by a `/` slash trigger.
+    is_slash: bool,
 }
 
 /// Multi-line text editor with pill support and overlay popups.
@@ -343,10 +345,20 @@ pub struct Editor {
     /// Currently active overlay popup (if any).
     overlay: Option<ActiveOverlay>,
 
+    /// Sub-completions keyed by command name (e.g. "model" → model items).
+    /// After Tab-completing a slash command, if sub-completions exist, a new
+    /// overlay opens automatically.
+    sub_completions: HashMap<String, Vec<SelectItem>>,
+
+    /// Ghost text color (dimmed suggestion from overlay).
+    pub ghost_fg: Color,
+
     pub pill_threshold: usize,
     pub pill_label_max: usize,
     pub pill_bg: Color,
     pub pill_fg: Color,
+    /// Ghost text — the overlay's selected value shown dimmed after cursor.
+    ghost_text: Option<String>,
 }
 
 impl Default for Editor {
@@ -367,16 +379,26 @@ impl Editor {
             pill_counter: 0,
             commands: Vec::new(),
             overlay: None,
+            sub_completions: HashMap::new(),
+            ghost_fg: Color::Rgb(100, 100, 110),
             pill_threshold: 50,
             pill_label_max: 25,
             pill_bg: Theme::default().pill_bg,
             pill_fg: Theme::default().pill_fg,
+            ghost_text: None,
         }
     }
 
     /// Set available slash commands. Typing `/` will open an overlay.
     pub fn set_commands(&mut self, commands: Vec<SelectItem>) {
         self.commands = commands;
+    }
+
+    /// Register sub-completions for a command name.
+    /// After Tab-completing `/foo`, if `"foo"` has sub-completions,
+    /// a new overlay opens with those items.
+    pub fn set_command_completions(&mut self, command: impl Into<String>, items: Vec<SelectItem>) {
+        self.sub_completions.insert(command.into(), items);
     }
 
     /// Apply theme colors to pill styling.
@@ -397,12 +419,15 @@ impl Editor {
             list: SelectList::new(items),
             trigger_line: self.cursor_line,
             trigger_col: self.cursor_col,
+            is_slash: false,
         });
+        self.update_ghost_text();
     }
 
     /// Dismiss the overlay if active.
     pub fn dismiss_overlay(&mut self) {
         self.overlay = None;
+        self.ghost_text = None;
     }
 
     // ── Helpers ─────────────────────────────────────────────────
@@ -451,6 +476,7 @@ impl Editor {
         self.cursor_col = 0;
         self.preferred_vcol = None;
         self.overlay = None;
+        self.ghost_text = None;
         self.pills.clear();
         self.pill_counter = 0;
     }
@@ -715,30 +741,82 @@ impl Editor {
         String::new()
     }
 
-    /// Sync the overlay filter with current editor text.
+    /// Sync the overlay filter with current editor text and ghost text.
+    /// If a slash overlay filter empties after the user typed `<cmd> `,
+    /// and that command has registered sub-completions, auto-switch.
     fn update_overlay_filter(&mut self) {
         let filter = self.overlay_filter_text();
         if let Some(ov) = &mut self.overlay {
             ov.list.filter(&filter);
+            // Auto-switch: slash overlay + typed "command " → sub-completions.
+            if ov.is_slash && filter.ends_with(' ') {
+                let cmd = filter.trim().trim_start_matches('/');
+                if let Some(items) = self.sub_completions.get(cmd) {
+                    if !items.is_empty() {
+                        let mut list = SelectList::new(items.clone());
+                        list.max_visible = 8;
+                        list.filter("");
+                        self.overlay = Some(ActiveOverlay {
+                            list,
+                            trigger_line: self.cursor_line,
+                            trigger_col: self.cursor_col,
+                            is_slash: false,
+                        });
+                        self.update_ghost_text();
+                        return;
+                    }
+                }
+            }
+        }
+        self.update_ghost_text();
+    }
+
+    /// Derive ghost text from the overlay's currently-highlighted item.
+    /// Shows the portion of the selected value that extends beyond what
+    /// the user has already typed.
+    fn update_ghost_text(&mut self) {
+        self.ghost_text = None;
+        if let Some(ov) = &self.overlay {
+            if let Some(value) = ov.list.select() {
+                let typed = self.overlay_filter_text();
+                // Ghost = suffix of value after the typed prefix.
+                if let Some(suffix) = value.strip_prefix(&typed) {
+                    if !suffix.is_empty() {
+                        self.ghost_text = Some(suffix.to_string());
+                    }
+                } else if !value.is_empty() {
+                    // No prefix match — show full value as ghost.
+                    self.ghost_text = Some(value);
+                }
+            }
         }
     }
 
     /// Check if cursor has moved before or to the trigger point, or
     /// the `/` trigger character was deleted → dismiss.
     fn check_overlay_dismiss(&mut self) {
-        let dismiss = if let Some(ov) = &self.overlay {
+        let (dismiss, was_sub) = if let Some(ov) = &self.overlay {
             if self.cursor_line != ov.trigger_line || self.cursor_col < ov.trigger_col {
-                true
-            } else {
+                (true, !ov.is_slash)
+            } else if ov.is_slash {
                 // Check that the `/` is still there at trigger_col.
                 let line = &self.lines[ov.trigger_line];
-                line.chars().nth(ov.trigger_col) != Some('/')
+                let gone = line.chars().nth(ov.trigger_col) != Some('/');
+                (gone, false)
+            } else {
+                (false, false)
             }
         } else {
-            false
+            (false, false)
         };
         if dismiss {
             self.overlay = None;
+            self.ghost_text = None;
+            // If a sub-completion was dismissed by backspacing, try to
+            // re-open the slash command overlay so the user can keep editing.
+            if was_sub && !self.commands.is_empty() {
+                self.try_reopen_slash();
+            }
         }
     }
 
@@ -763,7 +841,45 @@ impl Editor {
             list,
             trigger_line: self.cursor_line,
             trigger_col: slash_col,
+            is_slash: true,
         });
+        self.update_ghost_text();
+    }
+
+    /// Try to re-open the slash command overlay after a sub-completion was
+    /// dismissed by backspacing.  Scans backward from the cursor for a `/`
+    /// that would qualify as a slash trigger.
+    fn try_reopen_slash(&mut self) {
+        let line = &self.lines[self.cursor_line];
+        let chars: Vec<char> = line.chars().collect();
+        // Find the rightmost `/` at or before cursor that sits at col 0
+        // or is preceded by whitespace.
+        let mut slash_col = None;
+        for i in (0..self.cursor_col).rev() {
+            if chars[i] == '/' {
+                if i == 0 || chars[i - 1].is_whitespace() {
+                    slash_col = Some(i);
+                }
+                break;
+            }
+        }
+        let Some(sc) = slash_col else { return };
+
+        // Extract text between `/` (exclusive) and cursor as filter.
+        let filter: String = chars[sc + 1..self.cursor_col].iter().collect();
+
+        let mut list = SelectList::new(self.commands.clone());
+        list.max_visible = 5;
+        list.filter(&filter);
+        if list.is_empty() { return; }
+
+        self.overlay = Some(ActiveOverlay {
+            list,
+            trigger_line: self.cursor_line,
+            trigger_col: sc,
+            is_slash: true,
+        });
+        self.update_ghost_text();
     }
 
     /// Accept the selected overlay item: replace trigger..cursor with value, close overlay.
@@ -819,25 +935,54 @@ impl Editor {
             // Let the list handle navigation keys.
             let action = self.overlay.as_mut().unwrap().list.handle_key(&key);
             match action {
-                SelectAction::Selected(value) => {
+                SelectAction::Selected(_) => {
                     // Replace trigger text with the selected value.
-                    self.accept_overlay();
-                    if value.starts_with('/') {
-                        return KeyResult::Command(value);
+                    let is_sub = self.overlay.as_ref().map_or(false, |ov| !ov.is_slash);
+                    let value = self.accept_overlay();
+                    self.ghost_text = None;
+                    if let Some(ref value) = value {
+                        if value.starts_with('/') {
+                            return KeyResult::Command(value.clone());
+                        }
+                    }
+                    // Sub-completion enter → submit the whole line.
+                    if is_sub {
+                        return KeyResult::Submit;
                     }
                     return KeyResult::Consumed;
                 }
                 SelectAction::Completed(_value) => {
                     // Tab: fill the selected item + space, close overlay.
-                    self.accept_overlay();
+                    let accepted = self.accept_overlay();
+                    self.ghost_text = None;
                     self.insert_char(' ');
+                    // Open sub-completions if registered.
+                    if let Some(value) = accepted {
+                        let cmd_name = value.trim_start_matches('/').to_string();
+                        if let Some(items) = self.sub_completions.get(&cmd_name) {
+                            if !items.is_empty() {
+                                let mut list = SelectList::new(items.clone());
+                                list.max_visible = 8;
+                                list.filter("");
+                                self.overlay = Some(ActiveOverlay {
+                                    list,
+                                    trigger_line: self.cursor_line,
+                                    trigger_col: self.cursor_col,
+                                    is_slash: false,
+                                });
+                                self.update_ghost_text();
+                            }
+                        }
+                    }
                     return KeyResult::Consumed;
                 }
                 SelectAction::Dismissed => {
                     self.overlay = None;
+                    self.ghost_text = None;
                     return KeyResult::Consumed;
                 }
                 SelectAction::Consumed => {
+                    self.update_ghost_text();
                     return KeyResult::Consumed;
                 }
                 SelectAction::Ignored => {
@@ -869,6 +1014,7 @@ impl Editor {
             // If overlay is active, accept selection on Enter too.
             if self.overlay.is_some() {
                 if let Some(value) = self.accept_overlay() {
+                    self.ghost_text = None;
                     if value.starts_with('/') {
                         return KeyResult::Command(value);
                     }
@@ -929,7 +1075,7 @@ impl Editor {
     ///
     /// If an overlay is active, it composites on top of the lines
     /// already in the renderer (appearing above the editor input).
-    pub fn render(&self, r: &mut Renderer, left_margin: &str) {
+    pub fn render(&mut self, r: &mut Renderer, left_margin: &str) {
         let margin_w = visible_width(left_margin);
         let editor_w = (r.width() as usize).saturating_sub(margin_w);
 
@@ -946,22 +1092,29 @@ impl Editor {
         let base_row = r.line_count();
         let continuation = " ".repeat(margin_w);
 
+        let ghost_fg_sgr = Style::new().fg(self.ghost_fg).to_sgr();
         for (i, ll) in layout.iter().enumerate() {
             let prefix = if i == 0 { left_margin } else { &continuation };
-            r.push_line(format!("{prefix}{}", ll.text));
-
+            // Append ghost text on the cursor line.
             if ll.has_cursor {
+                if let Some(ref ghost) = self.ghost_text {
+                    r.push_line(format!("{prefix}{}{ghost_fg_sgr}{ghost}{RESET}", ll.text));
+                } else {
+                    r.push_line(format!("{prefix}{}", ll.text));
+                }
                 r.set_cursor(base_row + i, margin_w + ll.cursor_vcol);
+            } else {
+                r.push_line(format!("{prefix}{}", ll.text));
             }
         }
 
         // ── Overlay compositing (on top of lines above the editor) ──
-        if let Some(ov) = &self.overlay {
+        if let Some(ov) = &mut self.overlay {
             // Overlay starts 1 col after the `/` trigger, so labels align
             // with the text the user is typing after `/`.
             let overlay_col = margin_w + 1;
             let overlay_w = editor_w.saturating_sub(1).min(r.width() as usize / 2).max(20);
-            let overlay_lines = ov.list.render(overlay_w);
+            let overlay_lines = ov.list.render_constrained(overlay_w, editor_start_row);
             if !overlay_lines.is_empty() {
                 let overlay_h = overlay_lines.len();
                 let start = editor_start_row.saturating_sub(overlay_h);

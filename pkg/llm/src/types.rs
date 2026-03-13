@@ -39,19 +39,6 @@ pub struct Usage {
     pub total_tokens: u64,
     pub cost: Cost,
 }
-
-impl Usage {
-    /// Compute cost from token counts and per-token rates.
-    pub fn compute_cost(&mut self, cost_per_token: &ModelCost) {
-        self.cost.input = self.input as f64 * cost_per_token.input;
-        self.cost.output = self.output as f64 * cost_per_token.output;
-        self.cost.cache_read = self.cache_read as f64 * cost_per_token.cache_read;
-        self.cost.cache_write = self.cache_write as f64 * cost_per_token.cache_write;
-        self.cost.total = self.cost.input + self.cost.output + self.cost.cache_read + self.cost.cache_write;
-    }
-}
-
-
 // ---------------------------------------------------------------------------
 // Content blocks
 // ---------------------------------------------------------------------------
@@ -62,8 +49,6 @@ pub enum ContentBlock {
     #[serde(rename = "text")]
     Text {
         text: Str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        text_signature: Option<Str>,
     },
     #[serde(rename = "thinking")]
     Thinking {
@@ -76,8 +61,6 @@ pub enum ContentBlock {
         id: Str,
         name: Str,
         arguments: serde_json::Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        thought_signature: Option<Str>,
     },
 }
 
@@ -105,7 +88,6 @@ pub enum UserMessageContent {
 #[serde(rename_all = "camelCase")]
 pub struct UserMessage {
     pub content: UserMessageContent,
-    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,7 +101,6 @@ pub struct AssistantMessage {
     pub stop_reason: StopReason,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<Str>,
-    pub timestamp: u64,
 }
 
 impl AssistantMessage {
@@ -137,7 +118,6 @@ impl AssistantMessage {
             usage: Usage::default(),
             stop_reason,
             error_message: None,
-            timestamp: 0,
         }
     }
 }
@@ -151,7 +131,6 @@ pub struct ToolResultMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
     pub is_error: bool,
-    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,7 +204,7 @@ pub struct Model {
     pub input: Vec<InputModality>,
     pub cost: ModelCost,
     pub context_window: u64,
-    pub max_tokens: u64,
+    pub max_out: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<Vec<(Str, Str)>>,
 }
@@ -262,10 +241,9 @@ pub enum ThinkingLevel {
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
     pub temperature: Option<f64>,
-    pub max_tokens: Option<u64>,
+    pub max_out: Option<u64>,
     pub api_key: Option<Str>,
     pub cache_retention: Option<CacheRetention>,
-    pub session_id: Option<Str>,
     pub headers: Option<Vec<(Str, Str)>>,
     pub max_retry_delay_ms: Option<u64>,
     pub reasoning: Option<ThinkingLevel>,

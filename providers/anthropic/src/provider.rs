@@ -1,5 +1,8 @@
 //! Anthropic Messages API streaming provider.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use llm::{
     AssistantMessageEvent, Provider, ProviderError,
     StreamHandle, StreamRequest,
@@ -8,7 +11,7 @@ use llm::{
 
 use crate::convert::build_request_body;
 use crate::events::EventMapper;
-use crate::oauth;
+use crate::oauth::{self, OAuthCredentials};
 use crate::sse::{SseEvent, SseParser};
 
 /// Process SSE events through the mapper and send to tx.
@@ -50,14 +53,27 @@ fn dispatch_sse_events(
 /// - CC system prompt prepended
 /// - Tool names remapped to CC canonical casing (and back on response)
 ///
-/// This is transparent to the caller — the only visible difference is
-/// that `StreamOptions.api_key` must contain a valid OAuth access token.
-/// Use [`oauth::refresh_token`] to keep it fresh.
+/// ## OAuth auto-refresh
+///
+/// When constructed with [`with_oauth`], the provider holds shared
+/// [`OAuthCredentials`] in an `Rc<RefCell<>>`.  Before each request, if
+/// the access token is expired the provider calls
+/// [`oauth::refresh_token`] and updates the shared credentials
+/// transparently.  The caller can read the updated credentials via
+/// [`oauth_credentials`] for persistence.
+///
+/// This works because the entire runtime is single-threaded (`spawn_local`);
+/// no `Send` bounds are needed.
 pub struct AnthropicProvider {
     /// HTTP client (reused across requests for connection pooling).
     client: reqwest::Client,
-    /// Default API key (or OAuth token). Can be overridden per-request via `StreamOptions.api_key`.
+    /// Default API key (plain `sk-ant-…`). Used when OAuth credentials
+    /// are absent and `StreamOptions.api_key` is not set.
     api_key: Option<String>,
+    /// Shared OAuth credential slot. Starts `None`; populated by
+    /// `with_oauth()` or by the login flow. Auto-refreshed before
+    /// each request when present and expired.
+    oauth: Rc<RefCell<Option<OAuthCredentials>>>,
 }
 
 impl AnthropicProvider {
@@ -65,14 +81,43 @@ impl AnthropicProvider {
         Self {
             client: reqwest::Client::new(),
             api_key: None,
+            oauth: Rc::new(RefCell::new(None)),
         }
     }
 
+    /// Set a plain API key (`sk-ant-api01-…`).
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = Some(key.into());
         self
     }
 
+    /// Set OAuth credentials for auto-refresh.
+    ///
+    /// The provider stores them in `Rc<RefCell<>>` and refreshes the
+    /// access token automatically when it expires.  Call
+    /// [`oauth_credentials`] after requests to read the (potentially
+    /// updated) credentials for persistence.
+    pub fn with_oauth(mut self, creds: OAuthCredentials) -> Self {
+        self.oauth = Rc::new(RefCell::new(Some(creds)));
+        self
+    }
+
+    /// Set a pre-shared credential slot. The login flow and provider
+    /// share this `Rc<RefCell<Option<OAuthCredentials>>>`.
+    pub fn with_oauth_shared(mut self, slot: Rc<RefCell<Option<OAuthCredentials>>>) -> Self {
+        self.oauth = slot;
+        self
+    }
+
+    /// Access the shared OAuth credential slot.
+    ///
+    /// After login or token refresh the inner value may have changed.
+    /// Clone the `Rc` to read or persist credentials.
+    pub fn oauth_slot(&self) -> &Rc<RefCell<Option<OAuthCredentials>>> {
+        &self.oauth
+    }
+
+    /// Set a custom `reqwest::Client` (e.g. with proxy or timeout config).
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
         self.client = client;
         self
@@ -83,6 +128,7 @@ impl Provider for AnthropicProvider {
     fn stream(&self, req: StreamRequest) -> StreamHandle {
         let client = self.client.clone();
         let default_api_key = self.api_key.clone();
+        let oauth_creds = self.oauth.clone();
         let (tx, rx) = channel::channel();
 
         let model = req.model;
@@ -91,12 +137,13 @@ impl Provider for AnthropicProvider {
         let cancel = req.cancel;
 
         let task = Box::pin(async move {
-            let api_key = options.api_key.as_ref()
-                .map(|k| k.to_string())
-                .or(default_api_key)
-                .ok_or_else(|| ProviderError::Other(
-                    "no API key: set via StreamOptions.api_key or AnthropicProvider::with_api_key".into()
-                ))?;
+            let api_key = resolve_api_key(
+                &client,
+                &options,
+                default_api_key.as_deref(),
+                &oauth_creds,
+            )
+            .await?;
 
             let is_oauth = oauth::is_oauth_token(&api_key);
 
@@ -116,7 +163,7 @@ impl Provider for AnthropicProvider {
             // Auth and identity headers depend on token type
             if is_oauth {
                 request = request
-                    .header("accept", "application/json")
+                    .header("accept", "text/event-stream")
                     .header("authorization", format!("Bearer {}", api_key))
                     .header("anthropic-beta", oauth::OAUTH_BETA_FLAGS)
                     .header("user-agent", format!("claude-cli/{} (external, cli)", oauth::CLAUDE_CODE_VERSION))
@@ -208,10 +255,88 @@ impl Provider for AnthropicProvider {
 
         StreamHandle { events: rx, task }
     }
+
+    fn models(&self) -> Vec<llm::Model> {
+        crate::models::anthropic_models()
+    }
 }
 
 impl Default for AnthropicProvider {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl llm::Authenticator for AnthropicProvider {
+    fn auth_status(&self) -> llm::AuthStatus {
+        // Check OAuth slot first.
+        if let Some(creds) = self.oauth.borrow().as_ref() {
+            if creds.is_expired() {
+                return llm::AuthStatus::RefreshRequired;
+            }
+            return llm::AuthStatus::Authenticated;
+        }
+        // Fall back to plain API key.
+        if self.api_key.is_some() {
+            return llm::AuthStatus::Authenticated;
+        }
+        llm::AuthStatus::NotAuthenticated {
+            message: "Not logged in. Run /login to authenticate with Anthropic.".into(),
+        }
+    }
+
+    fn login(&self) -> llm::LoginReceiver {
+        crate::login::start_login(self.client.clone(), self.oauth.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// API key resolution with auto-refresh
+// ---------------------------------------------------------------------------
+
+/// Resolve the API key to use for a request.
+///
+/// Priority:
+/// 1. `StreamOptions.api_key` (per-request override)
+/// 2. OAuth credentials (auto-refreshed if expired)
+/// 3. `default_api_key` (plain API key from provider construction)
+///
+/// Returns the access/API key string, or an error.
+async fn resolve_api_key(
+    client: &reqwest::Client,
+    options: &llm::StreamOptions,
+    default_api_key: Option<&str>,
+    oauth_slot: &Rc<RefCell<Option<OAuthCredentials>>>,
+) -> Result<String, ProviderError> {
+    // Per-request override wins.
+    if let Some(key) = options.api_key.as_ref() {
+        return Ok(key.to_string());
+    }
+    // OAuth credentials with auto-refresh.
+    {
+        let slot = oauth_slot.borrow();
+        if let Some(creds) = slot.as_ref() {
+            if creds.is_expired() {
+                let refresh_tok = creds.refresh_token.clone();
+                drop(slot); // release borrow before await
+                let new_creds = oauth::refresh_token(client, &refresh_tok)
+                    .await
+                    .map_err(|e| ProviderError::Other(format!("OAuth refresh failed: {e}")))?;
+                *oauth_slot.borrow_mut() = Some(new_creds);
+            } else {
+                return Ok(creds.access_token.clone());
+            }
+            // Re-borrow after refresh
+            let slot = oauth_slot.borrow();
+            if let Some(creds) = slot.as_ref() {
+                return Ok(creds.access_token.clone());
+            }
+        }
+    }
+    // Plain API key.
+    default_api_key
+        .map(|k| k.to_string())
+        .ok_or_else(|| ProviderError::Other(
+            "no API key: set via StreamOptions.api_key, with_oauth(), or with_api_key()\nRun /login to authenticate with your Anthropic account.".into(),
+        ))
 }

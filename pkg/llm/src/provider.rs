@@ -74,4 +74,76 @@ pub struct StreamHandle {
 /// case the caller handles pushing the error event.
 pub trait Provider {
     fn stream(&self, req: StreamRequest) -> StreamHandle;
+    /// List available models for this provider.
+    ///
+    /// Returns an empty vec by default. Providers that know their model
+    /// catalog override this.
+    fn models(&self) -> Vec<crate::types::Model> {
+        Vec::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+/// Whether the provider is ready to make API calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthStatus {
+    /// Authenticated and ready.
+    Authenticated,
+    /// Has credentials that may be expired but can auto-refresh.
+    RefreshRequired,
+    /// Not authenticated — interactive login required.
+    NotAuthenticated { message: String },
+}
+
+/// A step in an interactive login flow.
+///
+/// The app layer decides how to present these to the user (open browser,
+/// print URL, show message). The authenticator drives the flow; the app
+/// renders it.
+pub enum LoginStep {
+    /// Display a message to the user (e.g. "Opening browser...").
+    Message(String),
+    /// Open this URL in the user's browser.
+    OpenUrl(String),
+    /// Prompt the user for text input (e.g. paste authorization code).
+    /// The login flow blocks until the reply is sent.
+    Prompt {
+        message: String,
+        reply: tokio::sync::oneshot::Sender<String>,
+    },
+    /// Login completed successfully. The provider is now authenticated.
+    Done,
+    /// Login failed.
+    Failed(String),
+}
+
+/// Receiver for login flow steps.  The app reads steps and acts on them.
+pub type LoginReceiver = crate::channel::Receiver<LoginStep>;
+
+/// Optional companion to [`Provider`]. Providers that require interactive
+/// authentication (OAuth, device code, etc.) implement this.
+///
+/// The login flow is asynchronous and non-blocking:
+///   1. App calls `login()` which returns a `LoginReceiver`.
+///   2. A background task drives the flow (PKCE, polling, etc.) and
+///      sends `LoginStep` values through the channel.
+///   3. The app reads steps and acts: opens browser, shows messages.
+///   4. `LoginStep::Done` signals success — the provider is now
+///      authenticated and subsequent `stream()` calls will work.
+///
+/// This design keeps the provider in control of the auth protocol
+/// while the app controls presentation. No `Send` bounds — everything
+/// runs on the local task set.
+pub trait Authenticator {
+    /// Check whether the provider has valid credentials.
+    fn auth_status(&self) -> AuthStatus;
+
+    /// Start an interactive login flow.
+    ///
+    /// Returns a channel that emits [`LoginStep`]s. The background task
+    /// is spawned via `tokio::task::spawn_local` inside this method.
+    fn login(&self) -> LoginReceiver;
 }

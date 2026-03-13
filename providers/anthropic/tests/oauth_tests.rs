@@ -16,7 +16,7 @@ fn test_model() -> Model {
         input: vec![],
         cost: ModelCost::default(),
         context_window: 200_000,
-        max_tokens: 8192,
+        max_out: 8192,
         headers: None,
     }
 }
@@ -117,7 +117,6 @@ fn oauth_mode_prepends_cc_system_prompt() {
         messages: vec![
             Message::User(UserMessage {
                 content: UserMessageContent::Text("Hi".into()),
-                timestamp: 0,
             }),
         ],
         tools: None,
@@ -139,7 +138,6 @@ fn oauth_mode_cc_system_prompt_even_without_user_prompt() {
         messages: vec![
             Message::User(UserMessage {
                 content: UserMessageContent::Text("Hi".into()),
-                timestamp: 0,
             }),
         ],
         tools: None,
@@ -160,7 +158,6 @@ fn api_key_mode_no_cc_system_prompt() {
         messages: vec![
             Message::User(UserMessage {
                 content: UserMessageContent::Text("Hi".into()),
-                timestamp: 0,
             }),
         ],
         tools: None,
@@ -181,7 +178,6 @@ fn api_key_mode_no_system_prompt_at_all() {
         messages: vec![
             Message::User(UserMessage {
                 content: UserMessageContent::Text("Hi".into()),
-                timestamp: 0,
             }),
         ],
         tools: None,
@@ -199,7 +195,6 @@ fn oauth_mode_remaps_tool_names_in_definitions() {
         messages: vec![
             Message::User(UserMessage {
                 content: UserMessageContent::Text("Hi".into()),
-                timestamp: 0,
             }),
         ],
         tools: Some(vec![
@@ -231,7 +226,6 @@ fn api_key_mode_preserves_tool_names() {
         messages: vec![
             Message::User(UserMessage {
                 content: UserMessageContent::Text("Hi".into()),
-                timestamp: 0,
             }),
         ],
         tools: Some(vec![
@@ -261,7 +255,6 @@ fn oauth_mode_remaps_tool_names_in_assistant_messages() {
                         id: "call1".into(),
                         name: "read".into(),
                         arguments: json!({"path": "/tmp"}),
-                        thought_signature: None,
                     },
                 ],
                 api: Str::new(),
@@ -270,7 +263,6 @@ fn oauth_mode_remaps_tool_names_in_assistant_messages() {
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
                 error_message: None,
-                timestamp: 0,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "call1".into(),
@@ -278,7 +270,6 @@ fn oauth_mode_remaps_tool_names_in_assistant_messages() {
                 content: vec![UserContent::Text { text: "data".into() }],
                 details: None,
                 is_error: false,
-                timestamp: 0,
             }),
         ],
         tools: None,
@@ -307,7 +298,6 @@ fn oauth_serialization_matches_expected_shape() {
         messages: vec![
             Message::User(UserMessage {
                 content: UserMessageContent::Text("Hello".into()),
-                timestamp: 0,
             }),
         ],
         tools: Some(vec![

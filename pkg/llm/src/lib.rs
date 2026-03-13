@@ -8,5 +8,5 @@ pub mod types;
 
 pub use cancel::CancelToken;
 pub use event::AssistantMessageEvent;
-pub use provider::{Provider, ProviderError, StreamHandle, StreamRequest};
+pub use provider::{AuthStatus, Authenticator, LoginReceiver, LoginStep, Provider, ProviderError, StreamHandle, StreamRequest};
 pub use types::*;

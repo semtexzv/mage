@@ -460,6 +460,44 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// A subdued theme for thinking blocks.
+    ///
+    /// All colors are desaturated / shifted towards grey, but still
+    /// differentiated — headings are dim gold, code is dim teal, etc.
+    /// Body text defaults to Ansi256(245) (medium grey).
+    pub fn thinking() -> Self {
+        Self {
+            accent: Color::Ansi256(246),
+            border: Color::Ansi256(240),
+            border_accent: Color::Ansi256(246),
+            border_muted: Color::Ansi256(238),
+            muted: Color::Ansi256(242),
+            dim: Color::Ansi256(238),
+            text: Some(Color::Ansi256(245)),
+            surface_bg: None,
+            surface_alt_bg: None,
+            success: Color::Ansi256(243),
+            warning: Color::Ansi256(243),
+            error: Color::Ansi256(243),
+            md_heading: Color::Rgb(160, 150, 100),
+            md_link: Color::Rgb(100, 120, 160),
+            md_link_url: Color::Ansi256(242),
+            md_code: Color::Rgb(100, 150, 150),
+            md_code_block: Color::Rgb(110, 140, 110),
+            md_code_block_border: Color::Ansi256(240),
+            md_quote: Color::Ansi256(243),
+            md_quote_border: Color::Ansi256(242),
+            md_hr: Color::Ansi256(240),
+            md_list_bullet: Color::Ansi256(244),
+            overlay_highlight_bg: Color::Rgb(35, 35, 45),
+            overlay_highlight_fg: Color::Ansi256(250),
+            overlay_label_fg: Color::Ansi256(246),
+            overlay_desc_fg: Color::Ansi256(242),
+            pill_bg: Color::Rgb(40, 40, 50),
+            pill_fg: Color::Ansi256(246),
+        }
+    }
+
     /// Wrap `text` in the foreground color for `slot`, resetting fg after.
     pub fn foreground(&self, slot: ThemeColor, text: &str) -> String {
         let color = self.resolve(slot);

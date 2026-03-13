@@ -4,6 +4,7 @@ use mage_tui::renderer::{Line, Renderer};
 use mage_tui::style::Color;
 use mage_tui::testutil::TestTerminal;
 use mage_tui::Padding;
+use mage_tui::Text;
 
 // ── begin_frame + push + end_frame basic flow ───────────────────
 
@@ -222,11 +223,8 @@ fn text_with_padding_renders_indentation_and_blanks() {
     let mut term = TestTerminal::new(80, 24);
 
     r.begin_frame(80, 24);
-    r.push_text_styled(
-        "hello",
-        &Padding::new(1, 0, 2, 4),
-        None,
-    );
+    let mut t = Text::new("hello").padding(Padding::new(1, 0, 2, 4));
+    t.render(&mut r);
     r.end_frame(&mut term);
     // 1 top blank + 1 content + 2 bottom blanks = 4 lines
     assert_eq!(r.prev_lines.len(), 4);
@@ -245,11 +243,8 @@ fn text_with_bg_fills_full_width() {
     let mut term = TestTerminal::new(40, 24);
 
     r.begin_frame(40, 24);
-    r.push_text_styled(
-        "hi",
-        &Padding::new(0, 0, 0, 2),
-        Some(Color::Blue),
-    );
+    let mut t = Text::new("hi").padding(Padding::new(0, 0, 0, 2)).bg(Color::Blue);
+    t.render(&mut r);
     r.end_frame(&mut term);
 
     assert_eq!(r.prev_lines.len(), 1);
@@ -258,9 +253,9 @@ fn text_with_bg_fills_full_width() {
     assert!(line.contains("\x1b[44m"), "missing bg code: {}", line);
     // Should end with reset
     assert!(line.ends_with("\x1b[0m"), "missing reset: {}", line);
-    // Content should have "  hi" (2 left pad) then spaces to fill width=40
-    // "  hi" is 4 visible chars, so 36 spaces fill
-    assert!(line.contains("  hi"), "missing padded content: {}", line);
+    // Visible content should have "  hi" (2 left pad)
+    let visible = strip_ansi(line);
+    assert!(visible.starts_with("  hi"), "missing padded content: {:?}", visible);
 }
 
 #[test]
@@ -269,11 +264,8 @@ fn text_with_bg_padding_fills_blank_lines() {
     let mut term = TestTerminal::new(20, 24);
 
     r.begin_frame(20, 24);
-    r.push_text_styled(
-        "x",
-        &Padding::new(1, 0, 0, 0),
-        Some(Color::Red),
-    );
+    let mut t = Text::new("x").padding(Padding::new(1, 0, 0, 0)).bg(Color::Red);
+    t.render(&mut r);
     r.end_frame(&mut term);
     assert_eq!(r.prev_lines.len(), 2);
     // Top padding line should also have bg fill
@@ -320,7 +312,10 @@ fn input_sets_cursor_at_correct_column() {
     let mut term = TestTerminal::new(80, 24);
 
     r.begin_frame(80, 24);
-    r.push_input("> ", "hello", 3);
+    let line = format!("{}{}", "> ", "hello");
+    let row = r.line_count();
+    r.push_line(line);
+    r.set_cursor(row, mage_tui::ansi::visible_width("> ") + 3);
     r.end_frame(&mut term);
 
     assert_eq!(r.prev_lines.len(), 1);
@@ -337,11 +332,8 @@ fn text_word_wraps() {
     let mut term = TestTerminal::new(20, 24);
     // "hello world foo bar" at width 10 should wrap
     r.begin_frame(20, 24);
-    r.push_text_styled(
-        "hello world foo bar",
-        &Padding::new(0, 5, 0, 5), // 5 left + 5 right = 10 inner width
-        None,
-    );
+    let mut t = Text::new("hello world foo bar").padding(Padding::new(0, 5, 0, 5)); // 5 left + 5 right = 10 inner width
+    t.render(&mut r);
     r.end_frame(&mut term);
     // With inner width 10: "hello" "world foo" "bar" or similar wrapping
     assert!(r.prev_lines.len() >= 2, "expected wrapping, got {} lines", r.prev_lines.len());
@@ -357,11 +349,8 @@ fn bg_filled_line_survives_content_reset() {
     let mut term = TestTerminal::new(20, 24);
     r.begin_frame(20, 24);
     // Content with an inline reset
-    r.push_text_styled(
-        "\x1b[1mhi\x1b[0m there",
-        &Padding::ZERO,
-        Some(Color::Blue),
-    );
+    let mut t = Text::new("\x1b[1mhi\x1b[0m there").bg(Color::Blue);
+    t.render(&mut r);
     r.end_frame(&mut term);
     let line = r.prev_lines[0].as_ref();
     // The fill spaces should still have blue bg.

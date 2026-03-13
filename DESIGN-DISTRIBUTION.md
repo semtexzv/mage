@@ -164,12 +164,8 @@ either try it again or fall back to the last "healthy" entry.
 ### Manual / cargo install
 
 For developers working on mage itself:
-
   cd ~/mage
-  cargo build --release
-  cp target/release/mage-host ~/.mage/bin/mage-dev-build
-  # append to generations.jsonl manually or:
-  cargo xtask install    # builds + copies + appends to generations.jsonl
+  cargo xtask bootstrap    # uses mage-build to synthesize + install a dev binary
 
 
 ## Binary Naming

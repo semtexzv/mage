@@ -218,6 +218,25 @@ impl Bundle {
         let main_source = template.render_main(&ctx)?;
         fs::write(src_dir.join("main.rs"), main_source)?;
 
+        // Copy module source files into src/modules/
+        if !self.modules.is_empty() {
+            let modules_dir = src_dir.join("modules");
+            fs::create_dir_all(&modules_dir)?;
+            for module in &self.modules {
+                if module.is_dir {
+                    // Directory module: copy the whole directory
+                    let src_module_dir = module.path.parent().ok_or_else(|| {
+                        Error::Bundle(format!("Module '{}' has no parent directory", module.name))
+                    })?;
+                    let dest_module_dir = modules_dir.join(&module.name);
+                    Self::copy_dir_recursive(src_module_dir, &dest_module_dir)?;
+                } else if module.path.exists() {
+                    let dest = modules_dir.join(format!("{}.rs", module.name));
+                    fs::copy(&module.path, &dest)?;
+                }
+            }
+        }
+
         // Generate Cargo.toml
         let cargo_toml_content = self.generate_cargo_toml(template.as_ref())?;
         fs::write(workspace_dir.join("Cargo.toml"), cargo_toml_content)?;
@@ -508,6 +527,22 @@ impl Bundle {
         Ok(map)
     }
 
+    /// Recursively copy a directory.
+    fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            let dest_path = dst.join(entry.file_name());
+            if ft.is_dir() {
+                Self::copy_dir_recursive(&entry.path(), &dest_path)?;
+            } else {
+                fs::copy(&entry.path(), &dest_path)?;
+            }
+        }
+        Ok(())
+    }
+
     fn generate_cargo_toml(&self, template: &dyn Template) -> Result<String> {
         let resolved_shared = Self::resolve_crate_dirs(&self.shared_libs)?;
         let resolved_core = Self::resolve_crate_dirs(&self.core_crates)?;
@@ -522,17 +557,18 @@ impl Bundle {
         doc.insert("package".into(), toml::Value::Table(package));
 
         // [workspace]
+        // The generated crate is its own workspace root. We do NOT list core crates
+        // as workspace members because they may already belong to a parent workspace
+        // (e.g., when bootstrapping from the mage repo). Path deps work without
+        // membership — cargo resolves them as external path dependencies.
         let mut workspace = toml::Table::new();
-        let all_members: Vec<&PathBuf> = resolved_shared
-            .values()
-            .chain(resolved_core.values())
-            .collect();
-        if !all_members.is_empty() {
-            let members: Vec<toml::Value> = all_members
-                .iter()
+        // Only add shared_libs as members (they're workspace-local by convention).
+        if !resolved_shared.is_empty() {
+            let members: Vec<toml::Value> = resolved_shared
+                .values()
                 .map(|path| {
                     let rel = pathdiff::diff_paths(path, &workspace_dir)
-                        .unwrap_or_else(|| (*path).clone());
+                        .unwrap_or_else(|| path.clone());
                     toml::Value::String(rel.to_string_lossy().replace('\\', "/"))
                 })
                 .collect();
@@ -1000,8 +1036,10 @@ mod tests {
         // It should automatically inject the core crate into dependencies
         assert!(toml_content.contains("[dependencies.mage_core]"));
 
-        // And it should automatically include it in the members
-        assert!(toml_content.contains("members = ["));
+        // Core crates should NOT be workspace members (they may belong to another
+        // workspace). They appear only as path dependencies.
+        assert!(!toml_content.contains("members"), "core crates must not be workspace members");
+        // But should still appear as a dependency
         assert!(toml_content.contains("mage_core"));
     }
 }

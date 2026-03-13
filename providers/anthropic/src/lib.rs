@@ -9,7 +9,9 @@ pub mod api_types;
 pub mod convert;
 pub mod events;
 pub mod oauth;
+pub mod login;
 pub mod provider;
+pub mod models;
 pub mod sse;
 
 pub use provider::AnthropicProvider;

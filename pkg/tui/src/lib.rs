@@ -10,6 +10,7 @@ pub mod style;
 pub mod testutil;
 pub mod wrap;
 pub mod layout;
+pub mod text;
 
 pub use app::{run, run_with_messages, App, Event};
 pub use keymap::{alt, ch, ctrl, f, sup, KeyBind, Keymap};
@@ -19,6 +20,7 @@ pub use keymap::{
 pub use markdown::Markdown;
 pub use editor::{Editor, KeyResult};
 pub use overlay::{SelectItem, SelectList, SelectAction, OverlayStyle, render_select_list};
-pub use renderer::{CursorPos, Line, Renderer};
+pub use renderer::{CursorPos, Line, LineSink, Renderer, View};
 pub use style::{Color, Padding, StyleStack, Style, Theme, ThemeColor};
 pub use ansi::{apply_sgr, RESET};
+pub use text::{Text, HRule};

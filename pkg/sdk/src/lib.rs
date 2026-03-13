@@ -9,35 +9,21 @@
 //! ```ignore
 //! use mage::prelude::*;
 //!
-//! struct MyTool;
-//! impl Tool for MyTool {
-//!     type State = String;
-//!     fn name(&self) -> &str { "my_tool" }
-//!     fn description(&self) -> &str { "Does a thing" }
-//!     fn parameters(&self) -> &serde_json::Value { todo!() }
-//!     fn execute(&self, _id: &str, params: serde_json::Value, _cancel: CancelToken) -> ToolExecution {
-//!         ToolResult::success("done").into()
-//!     }
-//! }
+//! struct MyExtension;
 //!
-//! pub fn init(reg: &mut Registry) {
-//!     reg.tool(MyTool);
+//! #[async_trait]
+//! impl Extension for MyExtension {
+//!     fn name(&self) -> &str { "my_extension" }
 //! }
 //! ```
 
-/// Extension trait, hooks, dispositions, amendment types, factory registry.
+/// Extension trait, hooks, event/result types, factory registry.
 pub use mage_core::extension;
-
-/// Tool trait, execution tiers, results, mailbox.
-pub use mage_core::tool;
 
 /// Agent message types, events, delivery modes.
 pub use mage_core::types;
 
-/// Agent builder and init recipe.
-pub use mage_core::agent;
-
-/// Session — primary runtime wrapper.
+/// Session handle and spawn.
 pub use mage_core::session;
 
 /// Agent loop (usually not needed by extensions directly).
@@ -65,31 +51,33 @@ pub use mage_build as build;
 pub mod prelude {
     // Extension system
     pub use crate::extension::{
-        Extension, Registry, FactoryRegistry, HookFuture,
-        Disposition, ToolResultAmend, InputAmend,
-        ContextAmend, CompactAmend, BashAmend,
-        ToolCallArgs, ToolResultArgs, TurnEndArgs,
-        MessageArgs, MessageDeltaArgs, ToolExecStartArgs, ToolExecEndArgs,
-        BeforeForkArgs, UserBashArgs, AgentEndArgs, ModelSelectArgs,
+        Extension, ExtensionFactory, ExtensionRegistry, ExtensionContext,
+        LoopHandle, LoopCommand, ToolHandle,
+        AgentEndEvent, TurnStartEvent, TurnEndEvent, ContextEvent,
+        ToolCallEvent, ToolResultEvent, InputEvent,
+        ContextResult, ToolCallResult, ToolResultResult, InputResult,
+        BeforeAgentStartEvent, BeforeAgentStartResult,
     };
+    pub use async_trait::async_trait;
 
     // Session
-    pub use crate::session::{AgentSession, SessionHandle};
+    pub use crate::session::SessionHandle;
+    pub use crate::session::spawn as spawn_session;
 
-    // Tools
-    pub use crate::tool::{
-        Tool, ToolExecution, ToolResult, ToolContent,
-        Mailbox, MailboxSender,
-    };
+    // Agent loop
+    pub use crate::agent_loop::{AgentLoop, LoopError};
 
     // Agent types
-    pub use crate::types::{Message, MessageBody, EntryId, AgentEvent, DeliverAs};
+    pub use crate::types::{Message, MessageBody, EntryId, AgentEvent, DeliverAs, ToolResult, ToolUpdate};
 
     // LLM types (the subset extensions actually touch)
     pub use crate::llm::CancelToken;
     pub use crate::llm::types::{
         UserContent, ContentBlock, Model, Usage,
     };
+
+    // Auth
+    pub use crate::llm::{AuthStatus, Authenticator, LoginStep, LoginReceiver};
 
     // Strings
     pub use refstr::Str;

@@ -26,8 +26,8 @@ pub fn build_request_body(
     options: &StreamOptions,
     is_oauth: bool,
 ) -> CreateMessageRequest {
-    let max_tokens = options.max_tokens
-        .unwrap_or_else(|| model.max_tokens / 3);
+    let max_tokens = options.max_out
+        .unwrap_or_else(|| model.max_out / 3);
 
     let system = build_system(context.system_prompt.as_deref(), options, is_oauth);
 

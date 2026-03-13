@@ -9,7 +9,11 @@ name = "mage_app"
 
 [dependencies]
 mage-core = { path = "../core" }
+mage-tui = { path = "../tui" }
 llm = { package = "mage-llm", path = "../llm" }
 refstr = { path = "../refstr" }
 serde_json.workspace = true
 tokio.workspace = true
+crossterm = { version = "0.28" }
+dirs = "6"
+serde.workspace = true

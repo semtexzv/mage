@@ -9,7 +9,12 @@ fn render_text(content: &str, padding: &Padding, bg: Option<mage_tui::Color>, wi
     let mut r = Renderer::new();
     let mut term = TestTerminal::new(width, 24);
     r.begin_frame(width, 24);
-    r.push_text_styled(content, padding, bg);
+    let mut t = mage_tui::Text::new(content);
+    t = t.padding(*padding);
+    if let Some(color) = bg {
+        t = t.bg(color);
+    }
+    t.render(&mut r);
     r.end_frame(&mut term);
     r.prev_lines.iter().map(|l| strip_ansi(l)).collect()
 }
@@ -187,7 +192,10 @@ fn input_cursor_position() {
     let mut r = Renderer::new();
     let mut term = TestTerminal::new(40, 24);
     r.begin_frame(40, 24);
-    r.push_input("> ", "hello", 3);
+    let line = format!("{}{}", "> ", "hello");
+    let row = r.line_count();
+    r.push_line(line);
+    r.set_cursor(row, mage_tui::ansi::visible_width("> ") + 3);
     r.end_frame(&mut term);
     // cursor at: prompt_width(2) + 3 = 5, terminal 1-indexed → ESC[6G
     assert!(term.output.contains("\x1b[6G"), "cursor col not set: {}", term.output);

@@ -5,7 +5,7 @@
 //! selection.
 
 use crate::ansi::{visible_width, RESET};
-use crate::style::{Color, Theme};
+use crate::style::{Color, Style, Theme};
 
 
 /// Visual style for overlay popups.
@@ -119,8 +119,10 @@ impl SelectList {
             .map(|(i, _)| i)
             .collect();
         // Keep selected in bounds.
-        if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len().saturating_sub(1);
+        if self.filtered.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len() - 1;
         }
         self.clamp_scroll();
     }
@@ -214,6 +216,39 @@ impl SelectList {
     pub fn render(&self, width: usize) -> Vec<String> {
         render_select_list(self, width)
     }
+
+    /// Render the list constrained to at most `max_height` output lines.
+    /// Re-clamps the scroll window so the selected item is always visible
+    /// within the available space.
+    pub fn render_constrained(&mut self, width: usize, max_height: usize) -> Vec<String> {
+        if max_height == 0 || self.filtered.is_empty() {
+            return Vec::new();
+        }
+        // Reserve up to 2 lines for scroll indicators (↑/↓).
+        let item_budget = max_height.saturating_sub(2).max(1);
+        let effective_visible = self.filtered.len().min(item_budget).min(self.max_visible);
+
+        // Re-clamp scroll so selected is within the effective window.
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        }
+        if self.selected >= self.scroll_offset + effective_visible {
+            self.scroll_offset = self.selected + 1 - effective_visible;
+        }
+
+        // Save and temporarily override max_visible for rendering.
+        let saved = self.max_visible;
+        self.max_visible = effective_visible;
+        let lines = render_select_list(self, width);
+        self.max_visible = saved;
+
+        // Final safety: truncate to max_height (shouldn't happen, but defensive).
+        if lines.len() > max_height {
+            lines.into_iter().take(max_height).collect()
+        } else {
+            lines
+        }
+    }
 }
 
 /// Render a SelectList into styled lines for overlay display.
@@ -226,10 +261,10 @@ pub fn render_select_list(list: &SelectList, width: usize) -> Vec<String> {
     let end = (list.scroll_offset + visible_count).min(list.filtered.len());
     let start = end.saturating_sub(visible_count);
 
-    let hl_bg = format!("\x1b[{}m", list.style.highlight_bg.bg_code());
-    let hl_fg = format!("\x1b[{}m", list.style.highlight_fg.fg_code());
-    let lbl_fg = format!("\x1b[{}m", list.style.label_fg.fg_code());
-    let dsc_fg = format!("\x1b[{}m", list.style.desc_fg.fg_code());
+    let hl_bg = Style::new().bg(list.style.highlight_bg).to_sgr();
+    let hl_fg = Style::new().fg(list.style.highlight_fg).to_sgr();
+    let lbl_fg = Style::new().fg(list.style.label_fg).to_sgr();
+    let dsc_fg = Style::new().fg(list.style.desc_fg).to_sgr();
 
     // Compute column widths using display labels (strip leading /).
     fn display_label(item: &SelectItem) -> &str {

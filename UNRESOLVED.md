@@ -6,12 +6,13 @@ Open questions only. Decided items live in their design files.
 
 ## 3. Extension Init Contract
 
-**Status: Partially Decided** — See `DESIGN-EXTENSIONS.md`.
+**Status: Decided** — See `DESIGN-EXTENSIONS.md`.
 
-Convention-based detection. Sync init. `mage::prelude`: yes.
+Extensions implement the `Extension` trait with `fn init(&mut self, reg: &mut ExtensionRegistry)`.
+Tools are closures registered via `ExtensionRegistry::tool(schema, closure)`.
+Providers via `ExtensionRegistry::provider(api, provider)`.
+`ExtensionFactory = Box<dyn Fn() -> Box<dyn Extension>>` provides per-session fresh instances.
 
-Open: registry method signature (lambda vs direct). Leaning lambda
-for extensions with lifecycle hooks (so each session gets a fresh instance).
 
 ---
 
@@ -31,9 +32,11 @@ UI notification for binary switching. Previous 4-tier model under revision.
 |---|---|---|---|
 | 1 | Reproducible builds | Decided | `DESIGN-REPRODUCIBLE-BUILDS.md` |
 | 2 | Tool execution & rendering | Decided | `DESIGN-TOOL-RENDERING.md`, `DESIGN-TUI.md` |
-| 3 | Extension init contract | Partially Decided | `DESIGN-EXTENSIONS.md` |
+| 3 | Extension init contract | Decided | `DESIGN-EXTENSIONS.md` |
 | 4 | Extension file format | Decided | `DESIGN-EXTENSIONS.md` |
 | 5 | SDK re-export surface | Decided | `DESIGN-SDK.md` |
 | 6 | Extension sources / modroots | Open | `DESIGN-EXTENSIONS.md` |
 | 7 | TUI rendering + tool output | Decided | `DESIGN-TUI.md`, `DESIGN-TOOL-RENDERING.md` |
 | 8 | SDK distribution model | Decided | `DESIGN-SDK.md` |
+| 9 | Binary synthesis model | Decided | `DESIGN.md` |
+| 10 | App layer | Decided | `DESIGN.md` |

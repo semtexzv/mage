@@ -17,7 +17,7 @@ use tokio::time::{self, Sleep};
 use crate::renderer::{ProcessTerminal, Renderer, Terminal};
 
 /// Events delivered to the app.
-pub enum Event<M: Send + 'static> {
+pub enum Event<M: 'static> {
     Key(KeyEvent),
     Resize(u16, u16),
     Message(M),
@@ -27,10 +27,10 @@ pub enum Event<M: Send + 'static> {
 
 /// The application trait.
 ///
-/// No `Send` bound — the app runs on the main thread. Only `Message`
-/// must be `Send` because messages arrive from background tasks.
+/// No `Send` bound — both the app and message producers run on the main
+/// thread via `spawn_local`. Nothing crosses thread boundaries.
 pub trait App: 'static {
-    type Message: Send + 'static;
+    type Message: 'static;
     /// Render into the renderer. Push lines, render views, set cursor.
     fn render(&mut self, r: &mut Renderer);
     /// Handle an event. Return `true` to quit.
@@ -47,7 +47,7 @@ fn restore_terminal() {
     if RAW_MODE_ACTIVE.swap(false, Ordering::SeqCst) {
         // Best-effort — ignore errors, we may be in a panic/signal handler.
         // Re-enable auto-wrap (DECAWM on) before restoring normal mode.
-        let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x1b[?7h");
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::EnableLineWrap);
         let _ = crossterm::execute!(
             std::io::stdout(),
             PopKeyboardEnhancementFlags,
@@ -116,7 +116,7 @@ pub async fn run_with_messages<A: App>(mut app: A, mut msg_rx: mpsc::Receiver<A:
 
     // Disable auto-wrap (DECAWM off): characters past the right margin
     // are clipped instead of wrapping to the next line.
-    print!("\x1b[?7l");
+    crossterm::execute!(std::io::stdout(), crossterm::terminal::DisableLineWrap).ok();
 
     let mut term = ProcessTerminal::new();
     let mut renderer = Renderer::new();

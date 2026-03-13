@@ -71,7 +71,11 @@ fn build_sections(outer: u16) -> Vec<String> {
         let mut r = Renderer::new();
         let mut term = mage_tui::testutil::TestTerminal::new(outer, 200);
         r.begin_frame(outer, 200);
-        r.push_text_styled(content, &pad, bg);
+        let mut t = Text::new(content).padding(pad);
+        if let Some(color) = bg {
+            t = t.bg(color);
+        }
+        t.render(&mut r);
         r.end_frame(&mut term);
         r.prev_lines.iter().map(|l| l.to_string()).collect()
     };
@@ -211,7 +215,10 @@ with five dozen liquor jugs.";
             let mut r = Renderer::new();
             let mut term = mage_tui::testutil::TestTerminal::new(outer, 200);
             r.begin_frame(outer, 200);
-            r.push_input(prompt, content, content.len());
+            let line = format!("{}{}", prompt, content);
+            let row = r.line_count();
+            r.push_line(line);
+            r.set_cursor(row, mage_tui::ansi::visible_width(prompt) + content.len());
             r.end_frame(&mut term);
             r.prev_lines.iter().map(|l| l.to_string()).collect::<Vec<_>>()
         };

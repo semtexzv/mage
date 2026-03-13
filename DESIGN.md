@@ -11,9 +11,9 @@ Consolidates three projects:
 
 ```
                     ┌─────────────────────────────────────────┐
-                    │             mage-host (binary)          │
-                    │  CLI, session management, modes         │
-                    │  (interactive / print / RPC / SDK)      │
+                    │     Synthesized Binary (mage-build)      │
+                    │  Generated main.rs wires all crates      │
+                    │  Bootstrap and self-replication identical │
                     └───────┬───────────┬──────────┬──────────┘
                             │           │          │
                ┌────────────┘     ┌─────┘          └──────────┐
@@ -36,6 +36,24 @@ Consolidates three projects:
     │  Str/Str<A>  │       │  (impl Provider) │
     └──────────────┘       └──────────────────┘
 ```
+
+## Binary Synthesis
+
+There is no hand-written binary crate in the workspace. All mage binaries are produced by `mage-build`'s `Bundle` + `Template` pipeline.
+
+A `MageTemplate` (implementing the `Template` trait) renders a `main.rs` that:
+- Includes extension modules via `#[path]` attributes
+- Calls their `init()` hooks to register tools and providers
+- Creates `AgentLoop` with providers, extensions, and configuration
+- Spawns the agent loop via `session::spawn()`
+- Wraps the session in an `App` (from `mage-app`)
+- Runs the TUI loop (or other frontend mode)
+
+**Bootstrap:** An `xtask bootstrap` (or equivalent build script) calls `Bundle::new("mage").with_template(MageTemplate).generate().compile()` to produce the initial binary distributed to users.
+
+**Self-replication:** When the agent modifies extensions and recompiles, it uses the exact same `MageTemplate` and `Bundle` pipeline. Bootstrap and self-replication are identical code paths.
+
+The generated binary IS the application. There is no separate app binary to maintain.
 
 ## Principles
 
@@ -74,8 +92,9 @@ mage/
 │   ├── sdk/                    # Re-export crate for extensions
 │   │   └── Cargo.toml          #   name = "mage"
 │   │
-│   └── bin/                    # Host binary and CLI
-│       └── Cargo.toml          #   name = "mage-host", [[bin]] name = "mage"
+│   └── app/                    # Application logic (session + commands)
+│       └── Cargo.toml          #   name = "mage-app"
+│       (No binary crate — all binaries are synthesized by mage-build)
 │
 ├── providers/                  # LLM provider implementations (workspace members)
 │   ├── anthropic/              #   name = "mage-anthropic"
@@ -96,12 +115,14 @@ mage/
 |---|---|---|---|
 | `pkg/refstr` | `refstr` | agentcore/crates/pistr | Ref-counted strings, zero external deps |
 | `pkg/llm` | `mage-llm` | agentcore/crates/llm | Message/ContentBlock/Usage types, Provider trait, AssistantMessageEvent, CancelToken, channel |
-| `pkg/core` | `mage-core` | agentcore/crates/agent-core | Extension trait + Registry, agent loop, Tool trait, AgentEvent, HookCtx, Disposition |
+| `pkg/core` | `mage-core` | agentcore/crates/agent-core | Extension trait + ExtensionRegistry, AgentLoop, AgentEvent, ToolResult |
 | `pkg/tui` | `mage-tui` | tau-tui-next | Differential renderer, StyleStack, Markdown (incremental, streaming), Editor (pills), Keymap (packed u64), Overlay |
 | `pkg/build` | `mage-build` | metarust | Bundle, Module (@dep parsing), Template trait, Toolchain, Compiler, DependencyResolver, toolchain downloader |
-| `pkg/sdk` | `mage` | new | Thin re-export crate for extension authors. Re-exports mage-core Extension trait, Tool trait, types |
-| `pkg/bin` | `mage-host` | new | CLI binary. Session management, extension discovery/compilation, interactive/print/RPC modes |
+| `pkg/sdk` | `mage` | new | Thin re-export crate for extension authors. Re-exports mage-core Extension trait, ExtensionRegistry, AgentLoop, types |
+| `pkg/app` | `mage-app` | new | Application logic: App struct, command registry. Sits between mage-core and UI layer |
 | `providers/anthropic` | `mage-anthropic` | agentcore/crates/anthropic | AnthropicProvider (HTTP/SSE streaming, partial JSON, API types) |
+
+There is no host binary crate. All mage binaries (including the initial bootstrap) are synthesized by `mage-build` using the `Template` trait. The `MageTemplate` generates `main.rs` that wires extensions, creates `AgentLoop`, spawns via `session::spawn()`, and runs the app. Bootstrap and self-replication use the same code path.
 
 ## Dependency Graph
 
@@ -111,32 +132,31 @@ refstr  (zero deps)
 mage-llm  (refstr, serde, serde_json, tokio)
   ↓
 mage-core  (mage-llm, refstr, serde, serde_json, tokio)
+  ↓
+mage-app  (mage-core, mage-llm, refstr)
+
+Synthesized binary  (mage-app, mage-core, mage-llm, mage-tui, mage-build, mage-anthropic)
   │
-  ├── mage-anthropic  (mage-llm, refstr, reqwest, bytes, futures-util)
-  │
-  ├── mage-tui  (crossterm, tokio, futures, pulldown-cmark, unicode-*)
-  │
-  └── mage-build  (syn, quote, minijinja, sha2, toml, regex, tar, zstd, tempfile, ...)
-       │
-       └── mage-host  (mage-core, mage-llm, mage-tui, mage-build, mage-anthropic, clap)
-            │
-            └── mage (sdk)  (re-exports mage-core types)
+  └── mage (sdk)  (re-exports mage-core, mage-app types)
+
+Sibling crates (no inter-dependencies):
+  mage-anthropic  (mage-llm, refstr, reqwest)
+  mage-tui  (crossterm, tokio, futures, pulldown-cmark)
+  mage-build  (syn, quote, minijinja, sha2, toml, ...)
 ```
 
 ## Extension System
 
 ### Static Linking
 
-Extensions are compiled into the host binary. No cdylib, no dlopen, no FFI.
+Extensions are compiled into the synthesized binary. No cdylib, no dlopen, no FFI.
 
 Two forms:
 
-**1. Built-in extensions** — Rust crates in `extensions/`, compiled as features of mage-host:
-```toml
-# pkg/bin/Cargo.toml
-[features]
-default = ["ext-tools-coding"]
-ext-tools-coding = ["dep:tools-coding"]
+**1. Built-in extensions** — Rust crates in `extensions/`, included by the `MageTemplate` during binary synthesis:
+```
+MageTemplate.render_main() includes built-in extension modules
+and calls their init() hooks alongside user extensions.
 ```
 
 **2. MetaRust extensions** — Single `.rs` files (or `mod.rs` directories) with `@dep` annotations, compiled on the fly by `mage-build` into a fresh binary that includes the extension.
@@ -148,24 +168,30 @@ ext-tools-coding = ["dep:tools-coding"]
 // @dep reqwest = { version = "0.12", features = ["json"] }
 use mage::prelude::*;
 
-struct FetchUrlTool;
-impl Tool for FetchUrlTool {
-    fn name(&self) -> &str { "fetch_url" }
-    fn description(&self) -> &str { "Fetch a URL and return its content" }
-    fn parameters(&self) -> &serde_json::Value { &FETCH_URL_SCHEMA }
+struct FetchUrlExtension;
 
-    fn execute(&self, _id: &str, params: serde_json::Value, _cancel: CancelToken) -> ToolExecution {
-        let url = params["url"].as_str().unwrap_or("").to_string();
-        ToolExecution::running(async move {
-            match reqwest::get(&url).await.and_then(|r| r.text().await) {
-                Ok(body) => ToolResult::success(body),
-                Err(e) => ToolResult::failure(format!("{e}")),
-            }
-        })
+#[async_trait(?Send)]
+impl Extension for FetchUrlExtension {
+    fn init(&mut self, reg: &mut ExtensionRegistry) {
+        reg.tool(
+            llm::Tool {
+                name: "fetch_url".into(),
+                description: "Fetch a URL and return its content".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "url": { "type": "string" } },
+                    "required": ["url"]
+                }),
+            },
+            |_id, params, _handle| async move {
+                let url = params["url"].as_str().unwrap_or("");
+                match reqwest::get(url).await.and_then(|r| r.text().await) {
+                    Ok(body) => ToolResult::success(body),
+                    Err(e) => ToolResult::failure(format!("{e}")),
+                }
+            },
+        );
     }
-}
-pub fn init(registry: &mut Registry) {
-    registry.tool(FetchUrlTool);
 }
 ```
 
@@ -237,19 +263,23 @@ The template for mage extensions would generate something like:
 
 ```rust
 // Generated main.rs
-#[path = "modules/my_tool.rs"]
-mod my_tool;
+#[path = "modules/fetch_url.rs"]
+mod fetch_url;
 
 fn main() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    rt.block_on(async {
-        // ... wire up agent, register extension, run loop ...
-        let mut registry = mage_core::extension::Registry::default();
-        my_tool::init(&mut registry);
-        // ... start agent with registered tools ...
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, async {
+        let extensions: Vec<Box<dyn Extension>> = vec![Box::new(fetch_url::FetchUrlExtension)];
+        let providers = vec![/* ... */];
+        let (agent_loop, event_rx) = AgentLoop::new(
+            "system prompt", model, options, providers, extensions,
+        );
+        let handle = session::spawn(agent_loop);
+        // ... run TUI with handle ...
     });
 }
 ```
@@ -294,52 +324,59 @@ an agent that generates its next generation, compiles it, and executes it.
 Inherited from agentcore, which ports pi-mono's architecture.
 
 ```
-extension.init(registry)        ← register tools/providers
+extension.init(registry)        ← register tools (closures) / providers
   │
-agent_start
+on_before_agent_start            ← modify system prompt
+on_agent_start
   │
-for each turn:
-  ├─ on_context(messages)       ← chain: hooks may replace message list
-  ├─ stream LLM response       ← only real channel (provider HTTP+SSE)
-  │    (observe: message_start/delta/end)
+outer loop (follow-ups):
+  inner loop (tool-use + steering):
+  ├─ on_turn_start
+  ├─ on_context(messages)       ← chain: Option<ContextResult>
+  ├─ stream LLM response
+  │    (emit: MessageStart/Delta/End)
   │
   for each tool_call in response:
-  │  ├─ on_tool_call(name,args) ← short-circuit: may block
-  │  ├─ tool.execute(args)      ← the actual work
-  │  ├─ on_tool_result(result)  ← chain: may amend
+  │  ├─ on_tool_call             ← Option<ToolCallResult>, block if .block=true
+  │  ├─ execute tool closure     ← RegisteredTool.execute(id, args, ToolHandle)
+  │  ├─ on_tool_result           ← Option<ToolResultResult>, may modify
   │  └─ drain steering queue
   │
-  ├─ (observe: turn_end)
-  └─ drain follow_up queue → next turn or finish
+  ├─ on_turn_end
+  └─ drain follow_up queue → continue outer or finish
   │
-agent_end
+on_agent_end
 ```
 
 Sequential. Deterministic event stream. Tools one at a time.
 Only LLM streaming uses a channel.
 
-### Dispatch Semantics
+### Hook Categories
 
-| Mode | Behavior | Hooks |
+| Category | Return type | Hooks |
 |---|---|---|
-| **Observe** | Call all. No return. | agent_start, turn_end, etc. |
-| **Short-circuit** | Call until Block. | tool_call, before_switch/fork |
-| **Chain** | Call until Block. Amendments accumulate. | before_start, tool_result |
-| **First-wins** | First Block or Value wins. | user_bash, before_compact |
+| **Lifecycle** | `()` (no return) | on_agent_start, on_agent_end, on_turn_start, on_turn_end, on_message_delta |
+| **Decision (block)** | `Option<XResult>` where XResult has `block: bool` | on_tool_call, on_input |
+| **Decision (modify)** | `Option<XResult>` with optional fields | on_context, on_tool_result, on_before_agent_start |
 
 ### Tool Model
 
+Tools are closures, not traits. Registered during `Extension::init()` via `ExtensionRegistry::tool(schema, closure)`.
+
 ```rust
-pub trait Tool: 'static {
-    type State: 'static = String;
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn parameters(&self) -> &serde_json::Value;
-    fn execute(&self, tool_call_id: &str, params: serde_json::Value, cancel: CancelToken) -> ToolExecution<Self::State>;
-}
+reg.tool(
+    llm::Tool { name, description, parameters },
+    |call_id: String, args: serde_json::Value, handle: ToolHandle| async move {
+        // handle.is_cancelled() for cooperative cancellation
+        // handle.send_update(ToolUpdate { .. }) for progress
+        // handle.loop_handle() to inject/steer messages
+        ToolResult::success("result")
+    },
+);
 ```
 
-Trait, not data struct. Three execution tiers: sync (return ToolResult directly), async (future, default rendering), custom (future + mailbox + custom rendering). See DESIGN-TOOL-RENDERING.md.
+`ToolResult` is a struct: `{ content: Vec<UserContent>, is_error: bool }`.
+`ToolHandle` provides: cancellation checking, progress updates via `send_update()`, and a `LoopHandle` for message injection.
 
 ## TUI
 
@@ -358,18 +395,11 @@ From agentcore's llm crate.
 
 ```rust
 pub trait Provider {
-    fn stream(
-        &self,
-        model: Model,
-        context: Context,
-        options: StreamOptions,
-        cancel: CancelToken,
-        tx: Sender<AssistantMessageEvent>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ProviderError>>>>;
+    fn stream(&self, req: StreamRequest) -> StreamHandle;
 }
 ```
 
-Every event carries the full partial `AssistantMessage`. Consumers never maintain their own state.
+`StreamRequest` bundles model, context, options, and cancel token. `StreamHandle` wraps a receiver of `AssistantMessageEvent` plus a join handle for the background task. Every event carries the full partial `AssistantMessage`. Consumers never maintain their own state.
 
 Event protocol:
 ```
@@ -476,21 +506,20 @@ JSONL with tree structure (entries with id/parentId).
 Enables in-place branching without new files.
 Compaction: summarize old messages while keeping recent history.
 
-## Extension Points (from pi-mono, via agentcore Extension trait)
+## Extension Points (via mage-core Extension trait)
 
-| Event | Dispatch | Purpose |
+| Event | Category | Purpose |
 |---|---|---|
-| `on_agent_start` | observe | Lifecycle notification |
-| `on_agent_end` | observe | Lifecycle notification |
-| `on_turn_start` | observe | Turn boundary |
-| `on_turn_end` | observe | Turn boundary |
-| `on_context` | chain | Replace/prune message list before LLM call |
-| `on_message` | observe | LLM message received |
-| `on_message_delta` | observe | Streaming token |
-| `on_tool_call` | short-circuit | Intercept/block tool call |
-| `on_tool_result` | chain | Amend tool result |
-| `on_input` | short-circuit | Intercept user input |
-| `on_bash` | first-wins | Override bash execution |
+| `on_agent_start` | lifecycle | Lifecycle notification |
+| `on_agent_end` | lifecycle | Lifecycle notification |
+| `on_before_agent_start` | decision (modify) | Modify system prompt before agent starts |
+| `on_turn_start` | lifecycle | Turn boundary |
+| `on_turn_end` | lifecycle | Turn boundary |
+| `on_message_delta` | lifecycle | Streaming token |
+| `on_tool_call` | decision (block) | Intercept/block tool call |
+| `on_tool_result` | decision (modify) | Amend tool result |
+| `on_input` | decision (block) | Intercept user input |
+| `on_context` | decision (modify) | Replace/prune message list before LLM call |
 
 ## What's Done (from agentcore)
 
@@ -509,10 +538,9 @@ Compaction: summarize old messages while keeping recent history.
 
 - [ ] Consolidate into this workspace (copy source, rename crates, fix imports)
 - [ ] pkg/sdk: re-export crate for extension authors
-- [ ] pkg/bin: CLI binary with session management
+- [ ] MageTemplate: Template implementation that generates the bootstrap and all subsequent binaries
 - [ ] Extension discovery and compilation pipeline (mage-build integration)
 - [ ] Built-in tools: read, bash, edit, write, grep, find, ls
-- [ ] MageTemplate: Jinja2 template that generates agent binaries with extensions
 - [ ] Self-modification loop: agent writes extension → mage-build compiles → exec replaces process
 - [ ] Sub-agent spawning
 - [ ] OpenAI provider
