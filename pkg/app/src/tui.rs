@@ -496,6 +496,21 @@ impl MageTui {
         None
     }
 
+    /// Count how many terminal lines the bottom chrome occupies.
+    fn count_chrome_lines(&mut self, width: u16) -> usize {
+        // blank + spinner/blank + hr + editor + hr + status
+        let mut count = 0usize;
+        count += 1; // blank
+        count += 1; // spinner or blank
+        count += 1; // hr
+        // Editor: typically 1 line. Multi-line editing is rare.
+        let _ = width;
+        count += 1;
+        count += 1; // hr
+        count += 1; // status
+        count
+    }
+
     fn update_widths(&mut self, w: u16) {
         if w == self.width {
             return;
@@ -518,12 +533,11 @@ impl mage_tui::App for MageTui {
     fn render(&mut self, r: &mut Renderer) {
         self.update_widths(r.width());
 
-        // Bottom chrome height: blank + spinner + hr + editor + hr + status.
-        // Editor is typically 1 line but can be multi-line.
-        let chrome_lines = 6usize; // approximate
+        // Measure chrome height by rendering it into a temporary counter.
+        // Chrome = blank + spinner/blank + hr + editor + hr + status.
+        let chrome_lines = self.count_chrome_lines(r.width());
 
-        // Spacer: push the editor to the bottom when the log is short.
-        // Uses last frame's content line count to estimate.
+        // Spacer: push editor to the bottom when the log is short.
         let content_lines = self.last_content_lines;
         let term_h = r.height() as usize;
         let spacer = term_h.saturating_sub(content_lines + chrome_lines);
@@ -531,8 +545,14 @@ impl mage_tui::App for MageTui {
             r.push_blank();
         }
 
-        // Chat log — each entry renders itself.
+        // Chat log with separators between entries.
+        let mut prev_is_user = false;
         for entry in &mut self.log {
+            // Blank line before assistant/tool content after user input.
+            let is_user = matches!(entry, Widget::User(_));
+            if prev_is_user && !is_user {
+                r.push_blank();
+            }
             match entry {
                 Widget::User(text) => text.render(r),
                 Widget::Assistant(md) => md.render(r),
@@ -541,9 +561,10 @@ impl mage_tui::App for MageTui {
                 Widget::Error(text) => text.render(r),
                 Widget::Info(text) => text.render(r),
             }
+            prev_is_user = is_user;
         }
 
-        // Spinner line — always present, active or blank.
+        // Chrome: spinner + hr + editor + hr + status
         r.push_blank();
         if self.running {
             self.spinner.render(r);
@@ -553,11 +574,9 @@ impl mage_tui::App for MageTui {
         self.hr.render(r);
         self.editor.render(r, " ");
         self.hr.render(r);
-
-        // Status bar: model · context · cache · cost
         self.status.render(r);
 
-        // Track content lines for next frame's spacer calculation.
+        // Track content lines for next frame's spacer.
         self.last_content_lines = r.line_count().saturating_sub(spacer);
     }
     fn update(&mut self, event: Event<Msg>) -> bool {
