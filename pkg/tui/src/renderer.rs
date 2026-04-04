@@ -257,9 +257,8 @@ impl Renderer {
 
         let is_first = self.prev_lines.is_empty() && self.prev_width == 0;
         let width_changed = !is_first && w != self.prev_width;
-        let shrunk = !is_first && lines.len() < self.prev_lines.len();
 
-        if is_first || width_changed || shrunk {
+        if is_first || width_changed {
             self.full_render(term, &lines, w, th, true);
         } else {
             self.diff_render(term, &lines, w, th);
