@@ -34,13 +34,13 @@ impl App {
         }
     }
 
-    // UNRESOLVED: How do extensions register commands?
+    // UNRESOLVED: How do modules register commands?
     //
-    // The Extension trait lives in mage-core. CommandRegistry lives in mage-app.
+    // The Module trait lives in mage-core. CommandRegistry lives in mage-app.
     // Core cannot depend on app (circular). Options:
-    //   (a) Add a generic callback slot to Extension::init
+    //   (a) Add a command registration method to Module
     //   (b) A second init pass using a separate trait that mage-app defines
-    //   (c) Extensions register commands via a well-known tool or convention
+    //   (c) Modules register commands via a well-known tool or convention
     //   (d) The application code registers commands explicitly
     //
     // For now, commands are registered by the application code that constructs

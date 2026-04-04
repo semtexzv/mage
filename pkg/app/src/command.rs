@@ -11,12 +11,12 @@ use mage_core::session::SessionHandle;
 ///
 /// Commands interact with the session exclusively through the handle:
 /// inject messages, abort, check idle status.  They never access
-/// session state, tools, or extensions directly.
+/// session state, tools, or modules directly.
 pub type CommandHandler = Rc<
     dyn Fn(&str, &SessionHandle) -> Pin<Box<dyn Future<Output = Result<(), CommandError>>>>,
 >;
 
-/// A slash command registered by an extension or the application.
+/// A slash command registered by a module or the application.
 #[derive(Clone)]
 pub struct Command {
     pub name: Str,

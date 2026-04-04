@@ -14,4 +14,5 @@ pub mod deps;
 pub mod downloader;
 pub mod error;
 pub mod module;
+pub mod template;
 pub mod toolchain;

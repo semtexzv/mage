@@ -1,6 +1,7 @@
 //! Anthropic Messages API streaming provider.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use llm::{
@@ -74,6 +75,10 @@ pub struct AnthropicProvider {
     /// `with_oauth()` or by the login flow. Auto-refreshed before
     /// each request when present and expired.
     oauth: Rc<RefCell<Option<OAuthCredentials>>>,
+    /// Optional path to a JSON file containing OAuth credentials.
+    /// Re-read on every request so external tools (Pi, etc.) can
+    /// keep the tokens fresh on disk.
+    credential_file: Option<PathBuf>,
 }
 
 impl AnthropicProvider {
@@ -82,7 +87,20 @@ impl AnthropicProvider {
             client: reqwest::Client::new(),
             api_key: None,
             oauth: Rc::new(RefCell::new(None)),
+            credential_file: None,
         }
+    }
+
+    /// Set a JSON credential file to re-read on every request.
+    ///
+    /// The file should contain an object with an `"anthropic"` key:
+    /// ```json
+    /// { "anthropic": { "type": "oauth", "refresh": "...", "access": "...", "expires": 123 } }
+    /// ```
+    /// Compatible with Pi's `~/.pi/agent/auth.json`.
+    pub fn with_credential_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.credential_file = Some(path.into());
+        self
     }
 
     /// Set a plain API key (`sk-ant-api01-…`).
@@ -129,6 +147,7 @@ impl Provider for AnthropicProvider {
         let client = self.client.clone();
         let default_api_key = self.api_key.clone();
         let oauth_creds = self.oauth.clone();
+        let cred_file = self.credential_file.clone();
         let (tx, rx) = channel::channel();
 
         let model = req.model;
@@ -142,6 +161,7 @@ impl Provider for AnthropicProvider {
                 &options,
                 default_api_key.as_deref(),
                 &oauth_creds,
+                cred_file.as_deref(),
             )
             .await?;
 
@@ -307,11 +327,20 @@ async fn resolve_api_key(
     options: &llm::StreamOptions,
     default_api_key: Option<&str>,
     oauth_slot: &Rc<RefCell<Option<OAuthCredentials>>>,
+    credential_file: Option<&std::path::Path>,
 ) -> Result<String, ProviderError> {
     // Per-request override wins.
     if let Some(key) = options.api_key.as_ref() {
         return Ok(key.to_string());
     }
+
+    // Re-read credential file if configured (Pi compatibility).
+    if let Some(path) = credential_file {
+        if let Some(creds) = read_credential_file(path) {
+            *oauth_slot.borrow_mut() = Some(creds);
+        }
+    }
+
     // OAuth credentials with auto-refresh.
     {
         let slot = oauth_slot.borrow();
@@ -339,4 +368,24 @@ async fn resolve_api_key(
         .ok_or_else(|| ProviderError::Other(
             "no API key: set via StreamOptions.api_key, with_oauth(), or with_api_key()\nRun /login to authenticate with your Anthropic account.".into(),
         ))
+}
+
+/// Read OAuth credentials from a Pi-compatible auth.json file.
+///
+/// Expected format:
+/// ```json
+/// { "anthropic": { "type": "oauth", "refresh": "...", "access": "...", "expires": 123 } }
+/// ```
+fn read_credential_file(path: &std::path::Path) -> Option<OAuthCredentials> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let entry = json.get("anthropic")?;
+    let refresh = entry.get("refresh")?.as_str()?;
+    let access = entry.get("access")?.as_str().unwrap_or("");
+    let expires = entry.get("expires")?.as_u64().unwrap_or(0);
+    Some(OAuthCredentials {
+        refresh_token: refresh.to_string(),
+        access_token: access.to_string(),
+        expires_at_ms: expires,
+    })
 }

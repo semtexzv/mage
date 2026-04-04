@@ -1,7 +1,5 @@
 //! Session — the primary runtime wrapper around the agent loop.
 //!
-//! ## Actor model
-//!
 //! ```text
 //! TUI / App ──LoopCommand──► Session loop
 //! TUI / App ◄──AgentEvent── Session loop
@@ -17,7 +15,7 @@ use std::rc::Rc;
 use llm::CancelToken;
 
 use crate::agent_loop::AgentLoop;
-use crate::extension::{LoopCommand, LoopHandle};
+use crate::handle::{LoopCommand, LoopHandle};
 use crate::types::{AgentEvent, Message};
 
 // ---------------------------------------------------------------------------
@@ -74,7 +72,7 @@ impl SessionHandle {
 impl SessionHandle {
     /// Create a disconnected handle for testing.
     pub fn test_handle() -> Self {
-        let (handle, _rx) = crate::extension::loop_handle_pair();
+        let (handle, _rx) = crate::handle::loop_handle_pair();
         Self {
             handle,
             running: Rc::new(Cell::new(false)),
@@ -90,14 +88,9 @@ impl SessionHandle {
 ///
 /// Returns a `SessionHandle` for sending commands and checking status.
 ///
-/// The session loop runs until it receives `Shutdown` or all handles
-/// are dropped.
-///
 /// # Panics
 /// Must be called from within a `tokio::task::LocalSet`.
-pub fn spawn(
-    mut agent_loop: AgentLoop,
-) -> SessionHandle {
+pub fn spawn(mut agent_loop: AgentLoop) -> SessionHandle {
     let handle = agent_loop.handle();
     let running = Rc::new(Cell::new(false));
     let session_handle = SessionHandle {
@@ -108,44 +101,28 @@ pub fn spawn(
     tokio::task::spawn_local(async move {
         let mut idle_messages: Vec<Message> = Vec::new();
 
-        // Main loop: wait for commands, run prompts.
         loop {
             running.set(false);
 
-            // Wait for user input (a message injected via LoopHandle).
+            // Wait for user input.
             let prompt = loop {
                 match agent_loop.cmd_rx_recv().await {
-                    Some(LoopCommand::InjectMessage(msg)) => {
-                        // Check if this looks like user input (from send_input)
-                        break msg;
-                    }
+                    Some(LoopCommand::InjectMessage(msg)) => break msg,
                     Some(LoopCommand::Shutdown) => return,
-                    Some(LoopCommand::Abort) => {
-                        // No active run to abort.
-                    }
-                    Some(LoopCommand::SteerMessage(msg)) => {
-                        idle_messages.push(msg);
-                    }
-                    Some(LoopCommand::FollowUpMessage(msg)) => {
-                        idle_messages.push(msg);
-                    }
-                    Some(LoopCommand::SetModel(model)) => {
-                        agent_loop.state.model = model;
-                    }
-                    None => {
-                        // All handles dropped.
-                        return;
-                    }
+                    Some(LoopCommand::Abort) => {} // no active run
+                    Some(LoopCommand::SteerMessage(msg)) => idle_messages.push(msg),
+                    Some(LoopCommand::FollowUpMessage(msg)) => idle_messages.push(msg),
+                    Some(LoopCommand::SetModel(model)) => agent_loop.model = model,
+                    None => return, // all handles dropped
                 }
             };
 
-            // Start a new prompt.
             running.set(true);
-            agent_loop.state.cancel = CancelToken::new();
+            agent_loop.cancel = CancelToken::new();
 
-            // Drain any messages injected while idle.
+            // Drain messages injected while idle.
             for msg in idle_messages.drain(..) {
-                agent_loop.state.messages.push(msg);
+                agent_loop.messages.push(msg);
             }
 
             let result = agent_loop.run(prompt).await;
@@ -155,7 +132,7 @@ pub fn spawn(
                     message: format!("{e}"),
                 });
                 agent_loop.emit(AgentEvent::AgentEnd {
-                    messages: agent_loop.state.messages.clone(),
+                    messages: agent_loop.messages.clone(),
                 });
             }
 
@@ -163,13 +140,8 @@ pub fn spawn(
             while let Some(cmd) = agent_loop.cmd_rx_try_recv() {
                 match cmd {
                     LoopCommand::Shutdown => return,
-                    LoopCommand::Abort => {} // already finished
-                    LoopCommand::InjectMessage(_) => {} // no active run
-                    LoopCommand::SteerMessage(_) => {}
-                    LoopCommand::FollowUpMessage(_) => {}
-                    LoopCommand::SetModel(model) => {
-                        agent_loop.state.model = model;
-                    }
+                    LoopCommand::SetModel(model) => agent_loop.model = model,
+                    _ => {} // ignore stale commands
                 }
             }
         }

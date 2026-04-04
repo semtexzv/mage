@@ -1,18 +1,21 @@
 [package]
-name = "mage-core"
+name = "mage-tools"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "mage_core"
+name = "mage_tools"
 
 [dependencies]
+mage-core = { path = "../core" }
+mage-build = { path = "../build" }
 llm = { package = "mage-llm", path = "../llm" }
 refstr = { path = "../refstr" }
-serde.workspace = true
+dirs = "6"
 serde_json.workspace = true
-tokio.workspace = true
-tokio-util.workspace = true
+tokio = { workspace = true, features = ["process", "fs", "io-util"] }
 async-trait.workspace = true
-uuid = { version = "1", features = ["v4"] }
+globset = "0.4"
+walkdir = "2"
+regex = "1"

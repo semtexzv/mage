@@ -1,24 +1,32 @@
 //! `mage` — SDK crate for the Mage agent framework.
 //!
-//! Single dependency for extension authors and the host binary.
+//! Single dependency for module authors and the host binary.
 //! Re-exports the full module tree from internal crates.
-//! No feature gates — every build has the same capabilities.
 //!
 //! # Quick start
 //!
 //! ```ignore
 //! use mage::prelude::*;
 //!
-//! struct MyExtension;
+//! struct MyModule;
 //!
 //! #[async_trait]
-//! impl Extension for MyExtension {
-//!     fn name(&self) -> &str { "my_extension" }
+//! impl Module for MyModule {
+//!     fn name(&self) -> &str { "my_module" }
 //! }
 //! ```
 
-/// Extension trait, hooks, event/result types, factory registry.
-pub use mage_core::extension;
+/// Handle and command types for loop communication.
+pub use mage_core::handle;
+
+/// Upgrade signaling (monitor pipe protocol).
+pub use mage_core::upgrade;
+
+/// Module trait, ModuleSet, GateResult.
+pub use mage_core::module;
+
+/// Tool system: ToolHandler, ToolDef, ToolRegistry.
+pub use mage_core::tool;
 
 /// Agent message types, events, delivery modes.
 pub use mage_core::types;
@@ -26,7 +34,10 @@ pub use mage_core::types;
 /// Session handle and spawn.
 pub use mage_core::session;
 
-/// Agent loop (usually not needed by extensions directly).
+/// Built-in tools: Read, Edit, Write, Bash, Glob, Grep.
+pub use mage_tools as tools;
+
+/// Agent loop (usually not needed by modules directly).
 pub use mage_core::agent_loop;
 
 /// Application layer: commands, input routing, session lifecycle.
@@ -47,17 +58,34 @@ pub use mage_tui as tui;
 /// Dynamic workspace compiler.
 pub use mage_build as build;
 
-/// Convenience prelude — everything an extension author typically needs.
+/// Run an async closure on a single-threaded tokio runtime with a LocalSet.
+///
+/// This is the standard entry point for mage binaries. Handles runtime
+/// construction so generated code doesn't need `tokio` as a direct dependency.
+pub fn run_local<F, Fut>(f: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, f());
+}
+
+/// Convenience prelude — everything a module author typically needs.
 pub mod prelude {
-    // Extension system
-    pub use crate::extension::{
-        Extension, ExtensionFactory, ExtensionRegistry, ExtensionContext,
-        LoopHandle, LoopCommand, ToolHandle,
-        AgentEndEvent, TurnStartEvent, TurnEndEvent, ContextEvent,
-        ToolCallEvent, ToolResultEvent, InputEvent,
-        ContextResult, ToolCallResult, ToolResultResult, InputResult,
-        BeforeAgentStartEvent, BeforeAgentStartResult,
-    };
+    // Module system
+    pub use crate::module::{GateResult, Module, ModuleSet};
+
+    // Tool system
+    pub use crate::tool::{ToolCall, ToolContext, ToolDef, ToolHandler, ToolCompletion};
+
+    // Handle
+    pub use crate::handle::{LoopCommand, LoopHandle};
+
     pub use async_trait::async_trait;
 
     // Session
@@ -68,13 +96,11 @@ pub mod prelude {
     pub use crate::agent_loop::{AgentLoop, LoopError};
 
     // Agent types
-    pub use crate::types::{Message, MessageBody, EntryId, AgentEvent, DeliverAs, ToolResult, ToolUpdate};
+    pub use crate::types::{AgentEvent, Message, MessageBody, EntryId, ToolResult, ToolUpdate};
 
-    // LLM types (the subset extensions actually touch)
+    // LLM types (the subset modules actually touch)
     pub use crate::llm::CancelToken;
-    pub use crate::llm::types::{
-        UserContent, ContentBlock, Model, Usage,
-    };
+    pub use crate::llm::types::{UserContent, ContentBlock, Model, Usage};
 
     // Auth
     pub use crate::llm::{AuthStatus, Authenticator, LoginStep, LoginReceiver};

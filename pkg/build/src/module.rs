@@ -271,6 +271,35 @@ impl ModuleResolver {
     }
 }
 
+/// Scan a directory for `.rs` modules. Returns empty vec if dir doesn't exist.
+///
+/// This is a convenience for bootstrap — scans one directory (non-recursively)
+/// for `.rs` files, parses each, and returns successfully parsed modules.
+/// Parse failures are printed to stderr and skipped.
+pub fn scan_directory(dir: &Path) -> Vec<Module> {
+    let mut modules = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return modules;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "rs") {
+            let name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy();
+            match Module::parse_file(&path, &name) {
+                Ok(m) => modules.push(m),
+                Err(e) => {
+                    eprintln!("  warning: failed to parse {}: {e}", path.display());
+                }
+            }
+        }
+    }
+    modules
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

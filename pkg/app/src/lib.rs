@@ -1,5 +1,8 @@
+pub mod rebuild;
 pub mod command;
 pub mod app;
+pub mod monitor;
+pub mod run;
 pub mod tui;
 pub mod credentials;
 

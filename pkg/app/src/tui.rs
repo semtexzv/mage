@@ -208,7 +208,7 @@ impl MageTui {
             mage_tui::SelectItem::new("/login", "Login to your Anthropic account"),
             mage_tui::SelectItem::new("/model", "Switch model (provider/model-id)"),
         ];
-        // Add extension-registered commands.
+        // Add module-registered commands.
         for name in app.commands.names() {
             let desc = app.commands.get(name)
                 .and_then(|c| c.description.as_deref())

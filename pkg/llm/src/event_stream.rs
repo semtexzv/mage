@@ -21,6 +21,12 @@ pub fn event_stream<T>() -> (EventStreamSender<T>, EventStreamReceiver<T>) {
     (EventStreamSender { tx }, EventStreamReceiver { rx })
 }
 
+impl<T> Clone for EventStreamSender<T> {
+    fn clone(&self) -> Self {
+        Self { tx: self.tx.clone() }
+    }
+}
+
 impl<T> EventStreamSender<T> {
     /// Push an event.
     pub fn push(&self, event: T) {

@@ -8,7 +8,7 @@ macro_rules! model {
         Model {
             id: $id.into(),
             name: $name.into(),
-            api: "anthropic-messages".into(),
+            api: "anthropic".into(),
             provider: "anthropic".into(),
             base_url: "https://api.anthropic.com".into(),
             reasoning: $reasoning,

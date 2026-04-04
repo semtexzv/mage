@@ -345,7 +345,7 @@ impl ToolResult {
 // ToolUpdate — progress from a running tool
 // ---------------------------------------------------------------------------
 
-/// Progress update sent from a tool to the UI via [`crate::extension::ToolHandle`].
+/// Progress update sent from a tool to the UI via [`crate::tool::ToolContext`].
 #[derive(Debug, Clone)]
 pub struct ToolUpdate {
     pub content: Vec<llm::UserContent>,

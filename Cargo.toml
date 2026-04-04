@@ -8,6 +8,7 @@ members = [
     "pkg/tui",
     "pkg/build",
     "providers/anthropic",
+    "pkg/tools",
     "pkg/sdk",
     "xtask",
 ]
@@ -20,4 +21,5 @@ rust-version = "1.85"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+tokio-util = "0.7"
 async-trait = "0.1"

@@ -1,8 +1,7 @@
 //! Smoke test — verifies core types are accessible and constructible.
 
-use mage_core::extension::{Extension, ExtensionContext, LoopHandle};
 use mage_core::session::SessionHandle;
-use mage_core::types::{AgentEvent, Message, ToolResult};
+use mage_core::types::{Message, ToolResult};
 
 #[test]
 fn tool_result_success() {
