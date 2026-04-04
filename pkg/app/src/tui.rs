@@ -214,6 +214,9 @@ struct MageTui {
     status: Text,
     /// Content line count from last frame (for spacer calculation).
     last_log_lines: usize,
+    /// Messages queued while agent is running. Rendered grayed out.
+    /// Stores (raw_text, styled_widget).
+    queued: Vec<(String, Text)>,
 }
 
 impl MageTui {
@@ -271,6 +274,7 @@ impl MageTui {
             spinner: Text::empty(),
             status: Text::empty(),
             last_log_lines: 0,
+            queued: Vec::new(),
         };
         tui.rebuild_status();
         tui
@@ -294,9 +298,19 @@ impl MageTui {
             self.execute_command(trimmed.to_string());
             return;
         }
-        self.log.push(Widget::User(make_user_text(trimmed)));
-        self.set_running(true);
-        self.app.handle.send_input(trimmed);
+        if self.running {
+            // Agent is busy — queue the message. It's sent to the agent loop
+            // (which defers it) and shown grayed out until the turn ends.
+            let mut queued_text = Text::new(trimmed);
+            queued_text = queued_text.style(Style::new().dim());
+            queued_text = queued_text.padding(PAD_BLOCK);
+            self.queued.push((trimmed.to_string(), queued_text));
+            self.app.handle.send_input(trimmed);
+        } else {
+            self.log.push(Widget::User(make_user_text(trimmed)));
+            self.set_running(true);
+            self.app.handle.send_input(trimmed);
+        }
     }
 
     /// Handle a slash command selected via the editor overlay.
@@ -574,6 +588,13 @@ impl mage_tui::App for MageTui {
                 Widget::Info(text) => text.render(r),
             }
         }
+        // Queued messages (grayed out, below streaming output).
+        for (_raw, widget) in &mut self.queued {
+            if !first { r.push_blank(); }
+            first = false;
+            widget.render(r);
+        }
+
         self.last_log_lines = r.line_count() - log_start;
 
         // Chrome: blank + spinner/blank + hr + editor + hr + status
@@ -737,7 +758,11 @@ impl MageTui {
                 }
             }
             AgentEvent::AgentEnd { messages } => {
-                // Check if the last message was aborted (cancelled).
+                // Move queued messages into the log as normal user widgets.
+                for (raw, _widget) in self.queued.drain(..) {
+                    self.log.push(Widget::User(make_user_text(&raw)));
+                }
+
                 let was_cancelled = messages.last().map_or(false, |m| {
                     matches!(
                         &m.body,

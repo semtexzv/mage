@@ -298,7 +298,8 @@ impl Renderer {
         buf.push_str(SYNC_BEGIN);
 
         if clear {
-            buf.push_str(CLEAR_SCROLLBACK);
+            // Don't clear scrollback — let the user scroll up to see history.
+            // Only clear the visible screen and reset cursor.
             buf.push_str(CLEAR_SCREEN);
             buf.push_str(CURSOR_HOME);
         }

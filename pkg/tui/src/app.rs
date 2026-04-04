@@ -112,7 +112,6 @@ pub async fn run_with_messages<A: App>(mut app: A, mut msg_rx: mpsc::Receiver<A:
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
             | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
         ),
-        terminal::Clear(terminal::ClearType::Purge),
         crossterm::cursor::MoveTo(0, 0),
     )
     .ok();
