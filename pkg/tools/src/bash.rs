@@ -175,6 +175,9 @@ impl ToolHandler for BashHandler {
 
         output.push_str(&format!("\n\nExit code: {exit_code}"));
 
+        // Replace tabs for rendering.
+        let output = output.replace('\t', "    ");
+
         if status.success() {
             ToolResult::success(output)
         } else {
@@ -204,7 +207,7 @@ async fn stream_output(
                 all_stdout.push('\n');
 
                 // Send the complete current view: last N lines of stdout.
-                let view = tail_lines(all_stdout, 8);
+                let view = tail_lines(all_stdout, 8).replace('\t', "    ");
                 ctx.send_text(view);
             }
         }
