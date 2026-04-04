@@ -1,8 +1,7 @@
 //! Recompile tool — lets the agent trigger self-recompilation.
 //!
-//! Scans extension modroots, compiles a new binary via `MageBuild`,
-//! and signals the monitor to upgrade (exit 42). If not under a monitor,
-//! returns the path as a tool result.
+//! Uses `MageBuild` if a workspace is found, otherwise falls back
+//! to the embedded snapshot. Signals the monitor to upgrade on success.
 
 use std::rc::Rc;
 
@@ -23,10 +22,10 @@ impl Module for RecompileModule {
         vec![ToolDef {
             schema: llm::Tool {
                 name: "Recompile".into(),
-                description: "Recompile the agent binary with any new or modified extensions \
+                description: "Recompile the agent binary with any new or modified modules \
                     from ~/.mage/modules/ and .mage/modules/. After compilation under \
                     the monitor, the agent process restarts with the new binary. Use after \
-                    writing a new extension file.".into(),
+                    writing a new module file.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {},
@@ -42,17 +41,24 @@ struct RecompileHandler;
 #[async_trait(?Send)]
 impl ToolHandler for RecompileHandler {
     async fn execute(&self, _args: serde_json::Value, _ctx: ToolContext) -> ToolResult {
-        let workspace_root = match mage_build::template::find_workspace_root() {
-            Some(r) => r,
-            None => return ToolResult::failure(
-                "Cannot find mage workspace root. Set MAGE_WORKSPACE_ROOT.",
-            ),
+        let module_dirs = standard_module_dirs();
+
+        // Try workspace first, then snapshot
+        let result = if let Some(root) = mage_build::template::find_workspace_root() {
+            mage_build::template::MageBuild::new(&root)
+                .standard_extension_dirs()
+                .compile()
+        } else {
+            let snapshot = mage_core::upgrade::get_snapshot();
+            if snapshot.is_empty() {
+                return ToolResult::failure(
+                    "No workspace and no embedded snapshot — cannot recompile.",
+                );
+            }
+            mage_build::template::compile_from_snapshot_data(snapshot, &module_dirs)
         };
 
-        let result = match mage_build::template::MageBuild::new(&workspace_root)
-            .standard_extension_dirs()
-            .compile()
-        {
+        let result = match result {
             Ok(r) => r,
             Err(e) => return ToolResult::failure(format!("Compilation failed: {e}")),
         };
@@ -73,14 +79,23 @@ impl ToolHandler for RecompileHandler {
             Ok(mage_core::upgrade::UpgradeSignal::Ready) => {
                 std::process::exit(mage_core::upgrade::UPGRADE_EXIT_CODE);
             }
-            Ok(mage_core::upgrade::UpgradeSignal::NoMonitor) => {
-                ToolResult::success(format!(
-                    "Compiled new binary at {}. \
-                     Not running under monitor — restart mage to use it.",
-                    path.display()
-                ))
-            }
+            Ok(mage_core::upgrade::UpgradeSignal::NoMonitor) => ToolResult::success(format!(
+                "Compiled new binary at {}. \
+                 Not running under monitor — restart mage to use it.",
+                path.display()
+            )),
             Err(e) => ToolResult::failure(format!("Upgrade signal failed: {e}")),
         }
     }
+}
+
+fn standard_module_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".mage/modules"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join(".mage/modules"));
+    }
+    dirs
 }

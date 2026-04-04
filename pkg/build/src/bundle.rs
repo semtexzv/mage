@@ -642,6 +642,29 @@ impl Bundle {
         // (e.g., when bootstrapping from the mage repo). Path deps work without
         // membership — cargo resolves them as external path dependencies.
         let mut workspace = toml::Table::new();
+
+        // [workspace.package] — core crates use `edition.workspace = true`
+        let mut ws_package = toml::Table::new();
+        ws_package.insert("edition".into(), toml::Value::String("2024".into()));
+        ws_package.insert("rust-version".into(), toml::Value::String("1.85".into()));
+        workspace.insert("package".into(), toml::Value::Table(ws_package));
+
+        // [workspace.dependencies] — shared deps referenced via .workspace = true
+        let mut ws_deps = toml::Table::new();
+        let serde_spec: toml::Table = toml::from_str(
+            r#"version = "1"
+features = ["derive", "rc"]"#
+        ).unwrap_or_default();
+        ws_deps.insert("serde".into(), toml::Value::Table(serde_spec));
+        ws_deps.insert("serde_json".into(), toml::Value::String("1".into()));
+        let tokio_spec: toml::Table = toml::from_str(
+            r#"version = "1"
+features = ["rt", "time", "sync", "macros"]"#
+        ).unwrap_or_default();
+        ws_deps.insert("tokio".into(), toml::Value::Table(tokio_spec));
+        ws_deps.insert("tokio-util".into(), toml::Value::String("0.7".into()));
+        ws_deps.insert("async-trait".into(), toml::Value::String("0.1".into()));
+        workspace.insert("dependencies".into(), toml::Value::Table(ws_deps));
         // Only add shared_libs as members (they're workspace-local by convention).
         if !resolved_shared.is_empty() {
             let members: Vec<toml::Value> = resolved_shared

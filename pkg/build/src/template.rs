@@ -58,7 +58,7 @@ const SNAPSHOT: &[u8] = include_bytes!("snapshot.tar.zst");
 {mod_decls}
 fn main() {{
     // Register embedded snapshot for `mage snapshot` subcommand.
-    mage::app::snapshot_cmd::set_snapshot(SNAPSHOT);
+    mage::upgrade::set_snapshot(SNAPSHOT);
 
     // Monitor wrapping: if not running under a monitor, become one.
     if !mage::upgrade::is_agent_mode() {{
@@ -240,66 +240,163 @@ pub fn extract_snapshot(data: &[u8], dest: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Compile from an extracted snapshot directory.
+/// Compile from an embedded snapshot.
 ///
-/// The snapshot must contain `Cargo.toml`, `main.rs`, and `crates/` with
-/// all core crate sources. The generated Cargo.toml uses path deps pointing
-/// into `crates/` within the snapshot.
-pub fn compile_from_snapshot(snapshot_dir: &std::path::Path) -> Result<CompilationResult> {
-    // The snapshot already contains a complete workspace layout:
-    // - Cargo.toml (with path deps to crates/)
-    // - main.rs
-    // - modules/ (extensions)
-    // - crates/ (core crate sources)
-    //
-    // But the Cargo.toml has path deps relative to the original workspace.
-    // We need to rewrite them to point at crates/ within the snapshot.
-
-    let cargo_toml_path = snapshot_dir.join("Cargo.toml");
-    if !cargo_toml_path.exists() {
-        return Err(Error::Bundle("snapshot missing Cargo.toml".into()));
+/// Extracts the snapshot to a temp directory, rewrites Cargo.toml path deps
+/// to point at `crates/` within the snapshot, optionally adds extension modules,
+/// then compiles.
+pub fn compile_from_snapshot_data(
+    data: &[u8],
+    extra_module_dirs: &[PathBuf],
+) -> Result<CompilationResult> {
+    let staging = std::env::temp_dir().join(format!("mage-rebuild-{}", std::process::id()));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
     }
 
-    // Rewrite Cargo.toml: replace all path deps with crates/<name>
+    eprintln!("extracting snapshot to {}...", staging.display());
+    extract_snapshot(data, &staging)?;
+
+    // Lay out as a proper cargo project: src/main.rs, src/modules/
+    let src_dir = staging.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+
+    let main_rs = staging.join("main.rs");
+    if main_rs.exists() {
+        std::fs::rename(&main_rs, src_dir.join("main.rs"))?;
+    }
+
+    let modules_src = staging.join("modules");
+    if modules_src.is_dir() {
+        std::fs::rename(&modules_src, src_dir.join("modules"))?;
+    }
+
+    // Scan extra module dirs and copy new modules into src/modules/
+    let mut extra_modules = Vec::new();
+    for dir in extra_module_dirs {
+        let found = module::scan_directory(dir);
+        for m in &found {
+            eprintln!("  found module: {} ({})", m.name, m.path.display());
+            // Copy to src/modules/
+            let modules_dir = src_dir.join("modules");
+            std::fs::create_dir_all(&modules_dir)?;
+            let dest = modules_dir.join(format!("{}.rs", m.name));
+            std::fs::copy(&m.path, &dest)?;
+        }
+        extra_modules.extend(found);
+    }
+
+    // If we have extra modules, re-render main.rs to include them
+    if !extra_modules.is_empty() {
+        let ctx = crate::bundle::RenderContext { modules: &extra_modules };
+        let main_source = MageTemplate.render_main(&ctx)?;
+        std::fs::write(src_dir.join("main.rs"), main_source)?;
+    }
+
+    // Ensure snapshot.tar.zst exists for include_bytes! in main.rs.
+    // For snapshot rebuilds, the original snapshot data is already baked in.
+    // Write the input data as the snapshot so the rebuilt binary embeds it too.
+    std::fs::write(src_dir.join("snapshot.tar.zst"), data)?;
+
+    // Rewrite Cargo.toml: all path deps → crates/<pkg-name>
+    rewrite_cargo_toml_for_snapshot(&staging)?;
+
+    // Compile
+    let toolchain = Toolchain::resolve_system()?;
+    eprintln!(
+        "toolchain: {} / {}",
+        toolchain.rustc_path.display(),
+        toolchain.cargo_path.display()
+    );
+
+    eprintln!("compiling from snapshot...");
+    let output = std::process::Command::new(&toolchain.cargo_path)
+        .arg("build")
+        .arg("--message-format=json")
+        .current_dir(&staging)
+        .output()
+        .map_err(|e| Error::Bundle(format!("cargo: {e}")))?;
+
+    let success = output.status.success();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !success {
+        eprintln!("{stderr}");
+    }
+
+    // Find the output binary
+    let executable_path = if success {
+        find_binary_in_target(&staging.join("target/debug"))
+    } else {
+        None
+    };
+
+    // Copy binary out of the temp dir before cleanup
+    let final_path = if let Some(ref bin) = executable_path {
+        let dest_dir = crate::default_approot().join("bin");
+        std::fs::create_dir_all(&dest_dir)?;
+        let dest = dest_dir.join(bin.file_name().unwrap_or_default());
+        std::fs::copy(bin, &dest)?;
+        eprintln!("binary: {}", dest.display());
+        Some(dest)
+    } else {
+        None
+    };
+
+    Ok(CompilationResult {
+        success,
+        executable_path: final_path,
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        cargo_stderr: stderr,
+        toolchain_metadata: toolchain.extract_metadata().unwrap_or_default(),
+        dep_info_files: Vec::new(),
+    })
+}
+
+/// Rewrite path deps in Cargo.toml to point at crates/ within the snapshot dir.
+fn rewrite_cargo_toml_for_snapshot(snapshot_dir: &std::path::Path) -> Result<()> {
+    let cargo_toml_path = snapshot_dir.join("Cargo.toml");
     let content = std::fs::read_to_string(&cargo_toml_path)?;
     let mut doc: toml::Table = toml::from_str(&content)
         .map_err(|e| Error::Bundle(format!("parse Cargo.toml: {e}")))?;
 
-    if let Some(toml::Value::Table(deps)) = doc.get_mut("dependencies") {
-        for (_name, spec) in deps.iter_mut() {
-            if let toml::Value::Table(t) = spec {
-                if let Some(toml::Value::String(path)) = t.get("path") {
-                    // Extract the crate name from the path (last component)
-                    let crate_dir = std::path::Path::new(path.as_str());
-                    let dir_name = crate_dir.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy();
+    // Collect available crate names from crates/ directory
+    let crates_dir = snapshot_dir.join("crates");
+    let mut available: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if crates_dir.is_dir() {
+        for entry in std::fs::read_dir(&crates_dir).into_iter().flatten().flatten() {
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            if entry.path().is_dir() {
+                available.insert(dir_name.clone(), format!("crates/{dir_name}"));
+            }
+        }
+    }
 
-                    // Find matching crate in the snapshot's crates/ dir
-                    let crates_dir = snapshot_dir.join("crates");
-                    if crates_dir.is_dir() {
-                        // Search for the crate by checking Cargo.toml package names
-                        for entry in std::fs::read_dir(&crates_dir).into_iter().flatten() {
-                            if let Ok(entry) = entry {
-                                let candidate = entry.path();
-                                if candidate.is_dir() {
-                                    let name = candidate.file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .to_string();
-                                    // Match by directory name (which is the package name in our snapshots)
-                                    if name == dir_name.as_ref() || candidate.join("Cargo.toml").exists() {
-                                        t.insert("path".into(), toml::Value::String(
-                                            format!("crates/{name}")
-                                        ));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+    // Rewrite each path dep
+    if let Some(toml::Value::Table(deps)) = doc.get_mut("dependencies") {
+        for (dep_key, spec) in deps.iter_mut() {
+            if let toml::Value::Table(t) = spec {
+                if t.contains_key("path") {
+                    // Use package field if present, else dep key
+                    let pkg_name = t.get("package")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(dep_key.as_str())
+                        .to_string();
+                    if let Some(rel) = available.get(&pkg_name) {
+                        t.insert("path".into(), toml::Value::String(rel.clone()));
                     }
                 }
             }
+        }
+    }
+
+    // Add crate directories as workspace members so Cargo resolves them
+    if let Some(toml::Value::Table(ws)) = doc.get_mut("workspace") {
+        let members: Vec<toml::Value> = available.values()
+            .map(|p| toml::Value::String(p.clone()))
+            .collect();
+        if !members.is_empty() {
+            ws.insert("members".into(), toml::Value::Array(members));
         }
     }
 
@@ -307,64 +404,86 @@ pub fn compile_from_snapshot(snapshot_dir: &std::path::Path) -> Result<Compilati
         .map_err(|e| Error::Bundle(format!("serialize Cargo.toml: {e}")))?;
     std::fs::write(&cargo_toml_path, new_content)?;
 
-    // Ensure src/ directory exists with main.rs
-    let src_dir = snapshot_dir.join("src");
-    std::fs::create_dir_all(&src_dir)?;
-    let main_rs = snapshot_dir.join("main.rs");
-    if main_rs.exists() {
-        std::fs::rename(&main_rs, src_dir.join("main.rs"))?;
+    // Also rewrite path deps in each crate's Cargo.toml within crates/
+    let crates_dir = snapshot_dir.join("crates");
+    if crates_dir.is_dir() {
+        for entry in std::fs::read_dir(&crates_dir).into_iter().flatten().flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let crate_cargo = entry.path().join("Cargo.toml");
+            if !crate_cargo.exists() {
+                continue;
+            }
+            rewrite_crate_internal_deps(&crate_cargo, &available)?;
+        }
     }
 
-    // Move modules into src/modules if present
-    let modules_src = snapshot_dir.join("modules");
-    let modules_dst = src_dir.join("modules");
-    if modules_src.is_dir() && !modules_dst.exists() {
-        std::fs::rename(&modules_src, &modules_dst)?;
-    }
+    Ok(())
+}
 
-    // Compile
-    let toolchain = Toolchain::resolve_system()?;
-    let output = std::process::Command::new(&toolchain.cargo_path)
-        .arg("build")
-        .arg("--message-format=json")
-        .current_dir(snapshot_dir)
-        .output()
-        .map_err(|e| Error::Bundle(format!("cargo: {e}")))?;
-
-    // For now, return a simple result
-    let success = output.status.success();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !success {
-        eprintln!("{stderr}");
-    }
-
-    let executable_path = if success {
-        let target_dir = snapshot_dir.join("target/debug");
-        std::fs::read_dir(&target_dir)
-            .ok()
-            .and_then(|entries| {
-                entries.filter_map(|e| e.ok()).find(|e| {
-                    let p = e.path();
-                    p.is_file()
-                        && !p.extension().is_some_and(|ext| ext == "d" || ext == "rmeta")
-                        && e.file_name().to_string_lossy().starts_with("mage")
-                })
-            })
-            .map(|e| e.path())
-    } else {
-        None
+/// Rewrite path deps inside a crate's Cargo.toml to point at sibling crates.
+///
+/// A crate at `crates/mage-tools/Cargo.toml` with `mage-llm = { path = "../llm" }`
+/// gets rewritten to `mage-llm = { path = "../mage-llm" }` using the available map.
+/// Rewrite path deps inside a crate's Cargo.toml to point at sibling crates.
+///
+/// Handles both `dep_name = { path = "..." }` and `dep_name = { package = "pkg", path = "..." }`.
+/// The `available` map is keyed by package name (e.g., `mage-llm`).
+fn rewrite_crate_internal_deps(
+    cargo_toml: &std::path::Path,
+    available: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let content = std::fs::read_to_string(cargo_toml)?;
+    let mut doc: toml::Table = match toml::from_str(&content) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
     };
 
-    Ok(CompilationResult {
-        success,
-        executable_path,
-        errors: Vec::new(),
-        warnings: Vec::new(),
-        cargo_stderr: stderr,
-        toolchain_metadata: toolchain.extract_metadata().unwrap_or_default(),
-        dep_info_files: Vec::new(),
-    })
+    let mut changed = false;
+
+    if let Some(toml::Value::Table(deps)) = doc.get_mut("dependencies") {
+        for (dep_key, spec) in deps.iter_mut() {
+            if let toml::Value::Table(t) = spec {
+                if t.contains_key("path") {
+                    // The actual package name: use `package` field if present, else the dep key
+                    let pkg_name = t.get("package")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(dep_key.as_str())
+                        .to_string();
+
+                    if available.contains_key(&pkg_name) {
+                        t.insert("path".into(), toml::Value::String(
+                            format!("../{pkg_name}")
+                        ));
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if changed {
+        let new_content = toml::to_string_pretty(&doc)
+            .map_err(|e| Error::Bundle(format!("serialize {}: {e}", cargo_toml.display())))?;
+        std::fs::write(cargo_toml, new_content)?;
+    }
+    Ok(())
+}
+
+fn find_binary_in_target(target_dir: &std::path::Path) -> Option<PathBuf> {
+    std::fs::read_dir(target_dir).ok().and_then(|entries| {
+        entries.filter_map(|e| e.ok()).find(|e| {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            p.is_file()
+                && !name.ends_with(".d")
+                && !name.ends_with(".rmeta")
+                && !name.ends_with(".rlib")
+                && !name.contains("build-script")
+                && (name.starts_with("mage") || name.contains("mage"))
+        })
+    }).map(|e| e.path())
 }
 
 fn format_size(bytes: u64) -> String {

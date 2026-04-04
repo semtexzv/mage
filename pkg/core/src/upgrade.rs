@@ -16,6 +16,25 @@ pub fn is_agent_mode() -> bool {
     std::env::var(PIPE_ENV).is_ok()
 }
 
+// ---------------------------------------------------------------------------
+// Embedded snapshot data
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static SNAPSHOT_DATA: std::cell::Cell<&'static [u8]> = const { std::cell::Cell::new(&[]) };
+}
+
+/// Register the embedded snapshot data. Called once at startup from the
+/// generated main.rs.
+pub fn set_snapshot(data: &'static [u8]) {
+    SNAPSHOT_DATA.with(|cell| cell.set(data));
+}
+
+/// Get the embedded snapshot data.
+pub fn get_snapshot() -> &'static [u8] {
+    SNAPSHOT_DATA.with(|cell| cell.get())
+}
+
 /// Outcome of an upgrade signal attempt.
 pub enum UpgradeSignal {
     /// Path written to pipe. Caller should exit with code 42.

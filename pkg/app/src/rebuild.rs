@@ -1,28 +1,35 @@
 //! `mage rebuild` subcommand — recompile the binary with current modules.
 //!
-//! Scans `~/.mage/modules/` and `.mage/modules/` for user-authored modules,
-//! compiles a new binary, and signals the monitor to upgrade (or prints
-//! the path if standalone).
+//! Two modes:
+//! - **Workspace mode**: if a mage workspace is found, uses `MageBuild` (full path deps)
+//! - **Snapshot mode**: if no workspace, uses the embedded snapshot to rebuild
+//!
+//! Both scan `~/.mage/modules/` and `.mage/modules/` for user-authored modules.
 
-use mage_build::template::{MageBuild, find_workspace_root};
+use std::path::PathBuf;
+
+use mage_build::template::{find_workspace_root, MageBuild};
 
 /// Run the rebuild subcommand.
 pub fn run_rebuild() {
-    let workspace_root = match find_workspace_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("error: cannot find mage workspace root");
-            eprintln!("set MAGE_WORKSPACE_ROOT or run from within the workspace");
+    let module_dirs = standard_module_dirs();
+
+    let result = if let Some(root) = find_workspace_root() {
+        eprintln!("rebuilding from workspace: {}", root.display());
+        MageBuild::new(&root)
+            .standard_extension_dirs()
+            .compile()
+    } else {
+        eprintln!("no workspace found, rebuilding from embedded snapshot...");
+        let snapshot = crate::snapshot_cmd::get_snapshot_data();
+        if snapshot.is_empty() {
+            eprintln!("error: no embedded snapshot and no workspace found");
             std::process::exit(1);
         }
+        mage_build::template::compile_from_snapshot_data(snapshot, &module_dirs)
     };
 
-    eprintln!("workspace: {}", workspace_root.display());
-
-    let result = match MageBuild::new(&workspace_root)
-        .standard_extension_dirs()
-        .compile()
-    {
+    let result = match result {
         Ok(r) => r,
         Err(e) => {
             eprintln!("rebuild failed: {e}");
@@ -57,4 +64,15 @@ pub fn run_rebuild() {
             std::process::exit(1);
         }
     }
+}
+
+fn standard_module_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".mage/modules"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join(".mage/modules"));
+    }
+    dirs
 }
