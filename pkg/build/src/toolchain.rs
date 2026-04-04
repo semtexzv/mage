@@ -7,7 +7,7 @@ use crate::downloader::HostTarget;
 use crate::error::{Error, Result};
 
 /// Metadata extracted from the toolchain
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolchainMetadata {
     pub cargo_path: PathBuf,
     pub rustc_path: PathBuf,

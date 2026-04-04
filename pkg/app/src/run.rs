@@ -125,6 +125,10 @@ pub async fn run(modules: Vec<Rc<dyn Module>>) {
                 crate::rebuild::run_rebuild();
                 return;
             }
+            "snapshot" => {
+                crate::snapshot_cmd::run_snapshot(&args[1..]);
+                return;
+            }
             _ => {}
         }
     }

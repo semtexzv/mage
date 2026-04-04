@@ -1,4 +1,5 @@
 pub mod rebuild;
+pub mod snapshot_cmd;
 pub mod command;
 pub mod app;
 pub mod monitor;

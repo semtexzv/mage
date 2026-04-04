@@ -51,8 +51,15 @@ impl Template for MageTemplate {
 use std::rc::Rc;
 use mage::prelude::*;
 
+/// Embedded snapshot — all sources needed to rebuild this binary.
+#[allow(dead_code)]
+const SNAPSHOT: &[u8] = include_bytes!("snapshot.tar.zst");
+
 {mod_decls}
 fn main() {{
+    // Register embedded snapshot for `mage snapshot` subcommand.
+    mage::app::snapshot_cmd::set_snapshot(SNAPSHOT);
+
     // Monitor wrapping: if not running under a monitor, become one.
     if !mage::upgrade::is_agent_mode() {{
         std::process::exit(match mage::app::monitor::run_monitor() {{
@@ -202,6 +209,171 @@ impl MageBuild {
 
         eprintln!("compiling...");
         bundle.compile()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot operations
+// ---------------------------------------------------------------------------
+
+/// List files in a snapshot archive.
+pub fn list_snapshot(data: &[u8]) -> Result<Vec<String>> {
+    let decoder = zstd::Decoder::new(data)
+        .map_err(|e| Error::Bundle(format!("zstd decode: {e}")))?;
+    let mut archive = tar::Archive::new(decoder);
+    let mut paths = Vec::new();
+    for entry in archive.entries().map_err(|e| Error::Bundle(format!("tar: {e}")))? {
+        let entry = entry.map_err(|e| Error::Bundle(format!("tar entry: {e}")))?;
+        let path = entry.path().map_err(|e| Error::Bundle(format!("tar path: {e}")))?;
+        let size = entry.size();
+        paths.push(format!("{:>8}  {}", format_size(size), path.display()));
+    }
+    Ok(paths)
+}
+
+/// Extract a snapshot archive to a directory.
+pub fn extract_snapshot(data: &[u8], dest: &std::path::Path) -> Result<()> {
+    let decoder = zstd::Decoder::new(data)
+        .map_err(|e| Error::Bundle(format!("zstd decode: {e}")))?;
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(dest).map_err(|e| Error::Bundle(format!("unpack: {e}")))?;
+    Ok(())
+}
+
+/// Compile from an extracted snapshot directory.
+///
+/// The snapshot must contain `Cargo.toml`, `main.rs`, and `crates/` with
+/// all core crate sources. The generated Cargo.toml uses path deps pointing
+/// into `crates/` within the snapshot.
+pub fn compile_from_snapshot(snapshot_dir: &std::path::Path) -> Result<CompilationResult> {
+    // The snapshot already contains a complete workspace layout:
+    // - Cargo.toml (with path deps to crates/)
+    // - main.rs
+    // - modules/ (extensions)
+    // - crates/ (core crate sources)
+    //
+    // But the Cargo.toml has path deps relative to the original workspace.
+    // We need to rewrite them to point at crates/ within the snapshot.
+
+    let cargo_toml_path = snapshot_dir.join("Cargo.toml");
+    if !cargo_toml_path.exists() {
+        return Err(Error::Bundle("snapshot missing Cargo.toml".into()));
+    }
+
+    // Rewrite Cargo.toml: replace all path deps with crates/<name>
+    let content = std::fs::read_to_string(&cargo_toml_path)?;
+    let mut doc: toml::Table = toml::from_str(&content)
+        .map_err(|e| Error::Bundle(format!("parse Cargo.toml: {e}")))?;
+
+    if let Some(toml::Value::Table(deps)) = doc.get_mut("dependencies") {
+        for (_name, spec) in deps.iter_mut() {
+            if let toml::Value::Table(t) = spec {
+                if let Some(toml::Value::String(path)) = t.get("path") {
+                    // Extract the crate name from the path (last component)
+                    let crate_dir = std::path::Path::new(path.as_str());
+                    let dir_name = crate_dir.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+
+                    // Find matching crate in the snapshot's crates/ dir
+                    let crates_dir = snapshot_dir.join("crates");
+                    if crates_dir.is_dir() {
+                        // Search for the crate by checking Cargo.toml package names
+                        for entry in std::fs::read_dir(&crates_dir).into_iter().flatten() {
+                            if let Ok(entry) = entry {
+                                let candidate = entry.path();
+                                if candidate.is_dir() {
+                                    let name = candidate.file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string();
+                                    // Match by directory name (which is the package name in our snapshots)
+                                    if name == dir_name.as_ref() || candidate.join("Cargo.toml").exists() {
+                                        t.insert("path".into(), toml::Value::String(
+                                            format!("crates/{name}")
+                                        ));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let new_content = toml::to_string_pretty(&doc)
+        .map_err(|e| Error::Bundle(format!("serialize Cargo.toml: {e}")))?;
+    std::fs::write(&cargo_toml_path, new_content)?;
+
+    // Ensure src/ directory exists with main.rs
+    let src_dir = snapshot_dir.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+    let main_rs = snapshot_dir.join("main.rs");
+    if main_rs.exists() {
+        std::fs::rename(&main_rs, src_dir.join("main.rs"))?;
+    }
+
+    // Move modules into src/modules if present
+    let modules_src = snapshot_dir.join("modules");
+    let modules_dst = src_dir.join("modules");
+    if modules_src.is_dir() && !modules_dst.exists() {
+        std::fs::rename(&modules_src, &modules_dst)?;
+    }
+
+    // Compile
+    let toolchain = Toolchain::resolve_system()?;
+    let output = std::process::Command::new(&toolchain.cargo_path)
+        .arg("build")
+        .arg("--message-format=json")
+        .current_dir(snapshot_dir)
+        .output()
+        .map_err(|e| Error::Bundle(format!("cargo: {e}")))?;
+
+    // For now, return a simple result
+    let success = output.status.success();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !success {
+        eprintln!("{stderr}");
+    }
+
+    let executable_path = if success {
+        let target_dir = snapshot_dir.join("target/debug");
+        std::fs::read_dir(&target_dir)
+            .ok()
+            .and_then(|entries| {
+                entries.filter_map(|e| e.ok()).find(|e| {
+                    let p = e.path();
+                    p.is_file()
+                        && !p.extension().is_some_and(|ext| ext == "d" || ext == "rmeta")
+                        && e.file_name().to_string_lossy().starts_with("mage")
+                })
+            })
+            .map(|e| e.path())
+    } else {
+        None
+    };
+
+    Ok(CompilationResult {
+        success,
+        executable_path,
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        cargo_stderr: stderr,
+        toolchain_metadata: toolchain.extract_metadata().unwrap_or_default(),
+        dep_info_files: Vec::new(),
+    })
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1}M", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes}B")
     }
 }
 
