@@ -127,13 +127,24 @@ pub fn spawn(mut agent_loop: AgentLoop) -> SessionHandle {
 
             let result = agent_loop.run(prompt).await;
 
-            if let Err(ref e) = result {
-                agent_loop.emit(AgentEvent::AgentError {
-                    message: format!("{e}"),
-                });
-                agent_loop.emit(AgentEvent::AgentEnd {
-                    messages: agent_loop.messages.clone(),
-                });
+            match &result {
+                Err(crate::agent_loop::LoopError::Cancelled) => {
+                    // Cancellation is not an error — just end the run.
+                    agent_loop.emit(AgentEvent::AgentEnd {
+                        messages: agent_loop.messages.clone(),
+                    });
+                }
+                Err(e) => {
+                    agent_loop.emit(AgentEvent::AgentError {
+                        message: format!("{e}"),
+                    });
+                    agent_loop.emit(AgentEvent::AgentEnd {
+                        messages: agent_loop.messages.clone(),
+                    });
+                }
+                Ok(()) => {
+                    // AgentEnd already emitted by run().
+                }
             }
 
             // Drain stragglers.

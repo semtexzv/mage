@@ -655,15 +655,37 @@ async fn stream_llm(
             event_tx.push(AgentEvent::MessageStart { message: msg });
         }
 
-        // Read streaming events.
-        while let Some(event) = rx.recv().await {
-            llm::event::apply_event(&mut assistant_msg, &event);
-            event_tx.push(AgentEvent::MessageDelta {
-                event: event.clone(),
-            });
-            if event.is_terminal() {
-                break;
+        // Read streaming events, racing against cancellation.
+        let mut cancelled_during_stream = false;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    cancelled_during_stream = true;
+                    break;
+                }
+                event = rx.recv() => {
+                    match event {
+                        Some(event) => {
+                            let terminal = event.is_terminal();
+                            llm::event::apply_event(&mut assistant_msg, &event);
+                            event_tx.push(AgentEvent::MessageDelta {
+                                event,
+                            });
+                            if terminal {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
             }
+        }
+
+        if cancelled_during_stream {
+            // Drop the stream task — it will see cancel on next chunk.
+            drop(stream_task);
+            return Err(LoopError::Cancelled);
         }
 
         // Wait for stream task.
