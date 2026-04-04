@@ -550,14 +550,21 @@ impl mage_tui::App for MageTui {
             r.push_blank();
         }
 
-        // Chat log with separators between entries.
+        // Chat log with spacing around agent blocks.
         let log_start = r.line_count();
-        let mut prev_is_user = false;
+        let mut prev_is_agent = false;
         for entry in &mut self.log {
-            let is_user = matches!(entry, Widget::User(_));
-            if prev_is_user && !is_user {
+            let is_agent = !matches!(entry, Widget::User(_));
+
+            // Blank line before agent content (assistant, tool, thinking).
+            if is_agent && !prev_is_agent {
                 r.push_blank();
             }
+            // Blank line before user input after agent content.
+            if !is_agent && prev_is_agent {
+                r.push_blank();
+            }
+
             match entry {
                 Widget::User(text) => text.render(r),
                 Widget::Assistant(md) => md.render(r),
@@ -566,7 +573,7 @@ impl mage_tui::App for MageTui {
                 Widget::Error(text) => text.render(r),
                 Widget::Info(text) => text.render(r),
             }
-            prev_is_user = is_user;
+            prev_is_agent = is_agent;
         }
         self.last_log_lines = r.line_count() - log_start;
 

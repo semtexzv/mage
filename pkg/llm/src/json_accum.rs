@@ -20,9 +20,14 @@ impl JsonAccumulator {
     }
 
     /// Parse the accumulated JSON and return the result.
-    /// Returns `Value::Null` if parsing fails (incomplete/malformed).
+    /// Returns an empty object `{}` if the buffer is empty or unparseable.
+    /// (The API requires tool_use input to be a valid dictionary, never null.)
     pub fn finish(&self) -> serde_json::Value {
-        serde_json::from_str(&self.buf).unwrap_or(serde_json::Value::Null)
+        if self.buf.is_empty() {
+            return serde_json::Value::Object(Default::default());
+        }
+        serde_json::from_str(&self.buf)
+            .unwrap_or_else(|_| serde_json::Value::Object(Default::default()))
     }
 
     /// Attempt a best-effort parse of the current buffer.
