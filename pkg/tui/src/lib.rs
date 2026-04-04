@@ -12,7 +12,7 @@ pub mod wrap;
 pub mod layout;
 pub mod text;
 
-pub use app::{run, run_with_messages, App, Event};
+pub use app::{run, run_with_messages, restore_terminal, App, Event};
 pub use keymap::{alt, ch, ctrl, f, sup, KeyBind, Keymap};
 pub use keymap::{
     BACKSPACE, DELETE, DOWN, END, ENTER, ESC, HOME, LEFT, PGDN, PGUP, RIGHT, TAB, UP,

@@ -92,7 +92,7 @@ impl ToolHandler for RecompileHandler {
 
         match mage_core::upgrade::signal_upgrade(&path) {
             Ok(mage_core::upgrade::UpgradeSignal::Ready) => {
-                std::process::exit(mage_core::upgrade::UPGRADE_EXIT_CODE);
+                mage_core::upgrade::safe_exit(mage_core::upgrade::UPGRADE_EXIT_CODE);
             }
             Ok(mage_core::upgrade::UpgradeSignal::NoMonitor) => ToolResult::success(format!(
                 "Compiled new binary at {}. \

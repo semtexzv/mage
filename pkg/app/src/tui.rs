@@ -592,6 +592,15 @@ impl mage_tui::App for MageTui {
     fn update(&mut self, event: Event<Msg>) -> bool {
         match event {
             Event::Key(key) => {
+                // Escape: stop the agent loop if running.
+                if key.code == KeyCode::Esc {
+                    if self.running {
+                        self.app.handle.abort();
+                    }
+                    return false;
+                }
+
+                // Ctrl-C: first press aborts, second press quits.
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && key.code == KeyCode::Char('c')
                 {
@@ -603,6 +612,7 @@ impl mage_tui::App for MageTui {
                     return true;
                 }
 
+                // Ctrl-D: quit immediately.
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && key.code == KeyCode::Char('d')
                 {

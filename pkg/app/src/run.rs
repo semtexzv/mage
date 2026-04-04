@@ -16,6 +16,8 @@ use crate::app::App;
 
 /// Run the full mage application with the given modules (interactive TUI).
 pub async fn run_default(modules: Vec<Rc<dyn Module>>) {
+    // Register exit hook so process::exit() (e.g., from Recompile) restores terminal.
+    mage_core::upgrade::set_exit_hook(mage_tui::restore_terminal);
     let (provider, authenticator, available_models, default_model) = setup_provider();
 
     let model_name = default_model.name.to_string();

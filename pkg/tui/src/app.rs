@@ -43,7 +43,10 @@ pub trait App: 'static {
 static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Restores terminal state: show cursor, disable raw mode, print newline.
-fn restore_terminal() {
+///
+/// Safe to call multiple times (idempotent via atomic flag).
+/// Call before `process::exit()` to ensure the terminal is usable.
+pub fn restore_terminal() {
     if RAW_MODE_ACTIVE.swap(false, Ordering::SeqCst) {
         // Best-effort — ignore errors, we may be in a panic/signal handler.
         // Re-enable auto-wrap (DECAWM on) before restoring normal mode.

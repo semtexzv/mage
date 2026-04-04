@@ -196,6 +196,7 @@ impl AgentLoop {
 
     pub async fn run(&mut self, prompt: Message) -> Result<(), LoopError> {
         let run_cancel = CancelToken::new();
+        self.handle.set_run_cancel(&run_cancel);
 
         // Local queues — owned by this stack frame, never shared.
         let mut steer_queue: VecDeque<Message> = VecDeque::new();
@@ -310,6 +311,7 @@ impl AgentLoop {
         }
 
         // ── agent end ────────────────────────────────────────────
+        self.handle.clear_run_cancel();
         self.emit(AgentEvent::AgentEnd {
             messages: self.messages.clone(),
         });

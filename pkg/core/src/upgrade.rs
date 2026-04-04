@@ -35,6 +35,30 @@ pub fn get_snapshot() -> &'static [u8] {
     SNAPSHOT_DATA.with(|cell| cell.get())
 }
 
+// ---------------------------------------------------------------------------
+// Exit hook — called before process::exit to restore terminal state
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static EXIT_HOOK: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
+/// Register a function to call before `process::exit`.
+/// The TUI layer calls this to register `restore_terminal`.
+pub fn set_exit_hook(hook: fn()) {
+    EXIT_HOOK.with(|cell| cell.set(Some(hook)));
+}
+
+/// Call the exit hook (if set), then exit with the given code.
+pub fn safe_exit(code: i32) -> ! {
+    EXIT_HOOK.with(|cell| {
+        if let Some(hook) = cell.get() {
+            hook();
+        }
+    });
+    std::process::exit(code);
+}
+
 /// Outcome of an upgrade signal attempt.
 pub enum UpgradeSignal {
     /// Path written to pipe. Caller should exit with code 42.
