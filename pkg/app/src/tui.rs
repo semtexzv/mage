@@ -212,6 +212,8 @@ struct MageTui {
     hr: HRule,
     spinner: Text,
     status: Text,
+    /// Content line count from last frame (for spacer calculation).
+    last_content_lines: usize,
 }
 
 impl MageTui {
@@ -268,6 +270,7 @@ impl MageTui {
             hr: HRule::new('─', FG_BORDER),
             spinner: Text::empty(),
             status: Text::empty(),
+            last_content_lines: 0,
         };
         tui.rebuild_status();
         tui
@@ -515,6 +518,19 @@ impl mage_tui::App for MageTui {
     fn render(&mut self, r: &mut Renderer) {
         self.update_widths(r.width());
 
+        // Bottom chrome height: blank + spinner + hr + editor + hr + status.
+        // Editor is typically 1 line but can be multi-line.
+        let chrome_lines = 6usize; // approximate
+
+        // Spacer: push the editor to the bottom when the log is short.
+        // Uses last frame's content line count to estimate.
+        let content_lines = self.last_content_lines;
+        let term_h = r.height() as usize;
+        let spacer = term_h.saturating_sub(content_lines + chrome_lines);
+        for _ in 0..spacer {
+            r.push_blank();
+        }
+
         // Chat log — each entry renders itself.
         for entry in &mut self.log {
             match entry {
@@ -526,6 +542,7 @@ impl mage_tui::App for MageTui {
                 Widget::Info(text) => text.render(r),
             }
         }
+
         // Spinner line — always present, active or blank.
         r.push_blank();
         if self.running {
@@ -539,6 +556,9 @@ impl mage_tui::App for MageTui {
 
         // Status bar: model · context · cache · cost
         self.status.render(r);
+
+        // Track content lines for next frame's spacer calculation.
+        self.last_content_lines = r.line_count().saturating_sub(spacer);
     }
     fn update(&mut self, event: Event<Msg>) -> bool {
         match event {
