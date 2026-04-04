@@ -559,14 +559,19 @@ impl mage_tui::App for MageTui {
         let chrome_lines = self.count_chrome_lines(r.width());
 
         // Spacer: push editor to the bottom when the log is short.
-        //
-        // total_frame = spacer + log_lines + chrome_lines
-        // We want total_frame = term_h (fill the screen).
-        // So spacer = term_h - log_lines - chrome_lines, clamped to 0.
-        //
-        // log_lines is measured from the previous frame.
+        // Uses last frame's log line count. This can overshoot by a few lines
+        // when content grows, which is fine — the terminal just scrolls.
+        // We cap the spacer to avoid massive gaps.
         let term_h = r.height() as usize;
-        let spacer = term_h.saturating_sub(self.last_log_lines + chrome_lines);
+        let spacer = if self.last_log_lines == 0 && self.log.is_empty() {
+            // First frame with no content: fill to push editor to bottom.
+            term_h.saturating_sub(chrome_lines)
+        } else {
+            // Subsequent frames: spacer based on last measurement.
+            // If log grew, spacer may be too large (frame > term_h).
+            // That causes terminal scroll, which is natural.
+            term_h.saturating_sub(self.last_log_lines + chrome_lines)
+        };
         for _ in 0..spacer {
             r.push_blank();
         }

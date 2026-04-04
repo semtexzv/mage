@@ -156,8 +156,9 @@ impl Renderer {
     }
 
     /// Append an empty line to the current frame.
+    /// Uses a shared singleton so Rc::ptr_eq detects unchanged blanks.
     pub fn push_blank(&mut self) {
-        self.lines.push(Rc::from(""));
+        self.lines.push(blank_line());
     }
 
     /// Append a slice of lines to the current frame (for cached widget output).
@@ -297,10 +298,11 @@ impl Renderer {
         buf.push_str(SYNC_BEGIN);
 
         if clear {
-            // Don't clear scrollback — let the user scroll up to see history.
-            // Only clear the visible screen and reset cursor.
+            // Clear visible screen + scrollback to avoid stale content mixing
+            // with new content when lines scroll past the terminal bottom.
             buf.push_str(CLEAR_SCREEN);
             buf.push_str(CURSOR_HOME);
+            buf.push_str(CLEAR_SCROLLBACK);
         }
 
         let w = width as usize;
@@ -548,14 +550,15 @@ impl Renderer {
         self.hw_cursor_row = target_row;
     }
 
+    /// Move cursor to a target logical line. Uses prev_vp_top consistently
+    /// for both current and target screen positions.
     fn move_cursor_to(&mut self, buf: &mut String, target: usize, th: usize) {
-        let vp_top = self.max_lines.saturating_sub(th);
         let max_s = th.saturating_sub(1);
         let cur_s = self
             .hw_cursor_row
             .saturating_sub(self.prev_vp_top)
             .min(max_s);
-        let tgt_s = target.saturating_sub(vp_top).min(max_s);
+        let tgt_s = target.saturating_sub(self.prev_vp_top).min(max_s);
         let delta = tgt_s as isize - cur_s as isize;
         if delta > 0 {
             buf.push_str(&cursor_down(delta as usize));
