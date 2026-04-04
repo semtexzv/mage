@@ -346,10 +346,14 @@ impl ToolResult {
 // ---------------------------------------------------------------------------
 
 /// Progress update sent from a tool to the UI via [`crate::tool::ToolContext`].
+///
+/// Contains the **complete current view** of the tool's output, not a delta.
+/// The TUI replaces the previous view with this one on each update.
+/// The tool owns its display state and decides what to show.
 #[derive(Debug, Clone)]
 pub struct ToolUpdate {
-    pub content: Vec<llm::UserContent>,
-    pub metadata: Option<serde_json::Value>,
+    /// Complete text to display right now (replaces previous).
+    pub text: String,
 }
 
 // ---------------------------------------------------------------------------

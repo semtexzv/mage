@@ -1,10 +1,9 @@
-//! Bash tool — execute shell commands.
+//! Bash tool — execute shell commands with streaming output.
 //!
-//! Always runs serially (never concurrent-safe) since shell commands
-//! can have arbitrary side effects.
+//! Always runs serially (never concurrent-safe). Output streams to the
+//! TUI line-by-line as the process runs via `ctx.send_text()`.
 //!
-//! Working directory persists across invocations via shared state
-//! in the module.
+//! Working directory persists across invocations.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -12,6 +11,7 @@ use std::rc::Rc;
 
 use async_trait::async_trait;
 use serde_json::json;
+use tokio::io::AsyncBufReadExt;
 
 use mage_core::module::Module;
 use mage_core::tool::{ToolContext, ToolDef, ToolHandler};
@@ -27,12 +27,15 @@ impl Module for BashModule {
     fn name(&self) -> &str { "bash" }
 
     fn tools(&self) -> Vec<ToolDef> {
-        let cwd = Rc::new(RefCell::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))));
+        let cwd = Rc::new(RefCell::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        ));
         vec![ToolDef {
             schema: llm::Tool {
                 name: "Bash".into(),
                 description: "Execute a bash command and return its output. \
-                    The working directory persists between calls.".into(),
+                    The working directory persists between calls."
+                    .into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -58,8 +61,6 @@ impl Module for BashModule {
 }
 
 struct BashHandler {
-    /// Shared working directory state. Updated after each command that
-    /// includes `cd`. Only accessed by this handler (serial execution).
     cwd: Rc<RefCell<PathBuf>>,
 }
 
@@ -79,8 +80,6 @@ impl ToolHandler for BashHandler {
 
         let cwd = self.cwd.borrow().clone();
 
-        // Wrap the command: cd to tracked cwd, run command, then print final cwd.
-        // The sentinel lets us extract the final cwd after execution.
         let sentinel = "__MAGE_CWD__";
         let wrapped = format!(
             "cd {} && {{ {command} ; }} ; __exit=$?; echo ; echo '{sentinel}' ; pwd ; exit $__exit",
@@ -98,10 +97,18 @@ impl ToolHandler for BashHandler {
             Err(e) => return ToolResult::failure(format!("Failed to spawn bash: {e}")),
         };
 
+        // Take ownership of stdout/stderr for streaming.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
         let timeout = tokio::time::Duration::from_millis(timeout_ms);
         let cancel = ctx.cancel_token().clone();
 
-        let status = tokio::select! {
+        // Stream stdout and stderr concurrently, line by line.
+        let mut all_stdout = String::new();
+        let mut all_stderr = String::new();
+
+        let stream_result = tokio::select! {
             biased;
 
             _ = cancel.cancelled() => {
@@ -112,24 +119,27 @@ impl ToolHandler for BashHandler {
             _ = tokio::time::sleep(timeout) => {
                 let _ = child.kill().await;
                 return ToolResult::failure(format!(
-                    "Command timed out after {}s",
-                    timeout_ms / 1000
+                    "Command timed out after {}s", timeout_ms / 1000
                 ));
             }
 
-            result = child.wait() => {
-                match result {
-                    Ok(s) => s,
-                    Err(e) => return ToolResult::failure(format!("Wait failed: {e}")),
-                }
+            result = stream_output(stdout, stderr, &ctx, &mut all_stdout, &mut all_stderr) => {
+                result
             }
         };
 
-        let stdout = read_pipe(child.stdout.take()).await;
-        let stderr = read_pipe(child.stderr.take()).await;
+        if let Err(e) = stream_result {
+            return ToolResult::failure(format!("IO error: {e}"));
+        }
+
+        // Wait for the process to finish.
+        let status = match child.wait().await {
+            Ok(s) => s,
+            Err(e) => return ToolResult::failure(format!("Wait failed: {e}")),
+        };
 
         // Extract final cwd from stdout sentinel.
-        let (user_stdout, new_cwd) = extract_cwd(&stdout, sentinel);
+        let (user_stdout, new_cwd) = extract_cwd(&all_stdout, sentinel);
         if let Some(dir) = new_cwd {
             *self.cwd.borrow_mut() = PathBuf::from(dir);
         }
@@ -140,12 +150,12 @@ impl ToolHandler for BashHandler {
         if !user_stdout.is_empty() {
             output.push_str(user_stdout);
         }
-        if !stderr.is_empty() {
+        if !all_stderr.is_empty() {
             if !output.is_empty() {
                 output.push('\n');
             }
             output.push_str("STDERR:\n");
-            output.push_str(&stderr);
+            output.push_str(&all_stderr);
         }
         if output.is_empty() {
             output.push_str("(no output)");
@@ -159,7 +169,7 @@ impl ToolHandler for BashHandler {
             output.truncate(cut);
             output.push_str(&format!(
                 "\n\n... output truncated ({} bytes total)",
-                user_stdout.len() + stderr.len()
+                user_stdout.len() + all_stderr.len()
             ));
         }
 
@@ -177,19 +187,57 @@ impl ToolHandler for BashHandler {
     }
 }
 
-async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> String {
-    match pipe {
-        Some(mut r) => {
-            let mut buf = Vec::new();
-            let _ = tokio::io::AsyncReadExt::read_to_end(&mut r, &mut buf).await;
-            String::from_utf8_lossy(&buf).into_owned()
+/// Stream stdout and stderr, sending a complete snapshot of visible output
+/// on each new line. The TUI replaces its view each time.
+async fn stream_output(
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+    ctx: &ToolContext,
+    all_stdout: &mut String,
+    all_stderr: &mut String,
+) -> std::io::Result<()> {
+    let stdout_task = async {
+        if let Some(out) = stdout {
+            let mut reader = tokio::io::BufReader::new(out).lines();
+            while let Some(line) = reader.next_line().await? {
+                all_stdout.push_str(&line);
+                all_stdout.push('\n');
+
+                // Send the complete current view: last N lines of stdout.
+                let view = tail_lines(all_stdout, 8);
+                ctx.send_text(view);
+            }
         }
-        None => String::new(),
-    }
+        Ok::<_, std::io::Error>(())
+    };
+
+    let stderr_task = async {
+        if let Some(err) = stderr {
+            let mut reader = tokio::io::BufReader::new(err).lines();
+            while let Some(line) = reader.next_line().await? {
+                all_stderr.push_str(&line);
+                all_stderr.push('\n');
+            }
+        }
+        Ok::<_, std::io::Error>(())
+    };
+
+    let (r1, r2) = tokio::join!(stdout_task, stderr_task);
+    r1?;
+    r2?;
+    Ok(())
 }
 
-/// Extract the user's output and the final cwd from stdout.
-/// Returns (user_output, Some(cwd)) or (full_stdout, None) if sentinel not found.
+/// Return the last `n` lines of text. If more lines exist, prepend "… N more lines".
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= n {
+        return lines.join("\n");
+    }
+    let skip = lines.len() - n;
+    format!("… {} more lines\n{}", skip, lines[skip..].join("\n"))
+}
+
 fn extract_cwd<'a>(stdout: &'a str, sentinel: &str) -> (&'a str, Option<&'a str>) {
     if let Some(pos) = stdout.rfind(sentinel) {
         let user_output = stdout[..pos].trim_end();

@@ -68,6 +68,11 @@ impl ToolContext {
         let _ = self.update_tx.send(update);
     }
 
+    /// Convenience: send a text update.
+    pub fn send_text(&self, text: impl Into<String>) {
+        let _ = self.update_tx.send(ToolUpdate { text: text.into() });
+    }
+
     /// Access the loop handle for injecting/steering messages.
     pub fn loop_handle(&self) -> &LoopHandle {
         &self.loop_handle

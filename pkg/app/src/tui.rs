@@ -93,27 +93,17 @@ impl ToolWidget {
         }
     }
 
-    /// Append streaming progress text.
+    /// Replace the streaming view with the tool's current state.
     fn update(&mut self, text: &str) {
-        if self.done {
+        if self.done || text.is_empty() {
             return;
         }
-        let stream = self.streaming.get_or_insert_with(|| {
-            Text::new("").style(Style::new().dim()).bg(BG_TOOL).padding(Padding::new(0, 1, 0, 1))
-        });
-        // Replace with latest content (truncated to 8 lines).
-        let lines: Vec<&str> = text.lines().collect();
-        let show = lines.len().min(8);
-        let display: String = lines[lines.len() - show..].join("\n");
-        let content = if lines.len() > 8 {
-            format!("… {} lines above\n{display}", lines.len() - 8)
-        } else {
-            display
-        };
-        *stream = Text::new(content)
-            .style(Style::new().dim())
-            .bg(BG_TOOL)
-            .padding(Padding::new(0, 1, 0, 1));
+        self.streaming = Some(
+            Text::new(text)
+                .style(Style::new().dim())
+                .bg(BG_TOOL)
+                .padding(Padding::new(0, 1, 0, 1)),
+        );
     }
 
     fn complete(&mut self, is_error: bool, summary: &str) {
@@ -644,17 +634,9 @@ impl MageTui {
             AgentEvent::ToolExecUpdate {
                 tool_call_id, update, ..
             } => {
-                // Find the tool widget by call_id and stream the update.
                 if let Some(tw) = self.find_tool(&tool_call_id) {
-                    let text = update.content.iter()
-                        .filter_map(|c| match c {
-                            llm::UserContent::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    if !text.is_empty() {
-                        tw.update(&text);
+                    if !update.text.is_empty() {
+                        tw.update(&update.text);
                     }
                 }
             }
