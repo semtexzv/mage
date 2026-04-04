@@ -451,7 +451,9 @@ impl MageTui {
 
     fn show_cancelled(&mut self) {
         self.running = false;
-        self.spinner.set_styled(" cancelled", Style::new().fg(FG_DIM));
+        self.spinner = Text::empty();
+        self.spinner.push("✗ ", Style::new().bold().fg(Color::Red));
+        self.spinner.push("cancelled", Style::new().fg(Color::Red));
     }
 
     fn rebuild_status(&mut self) {
@@ -555,21 +557,14 @@ impl mage_tui::App for MageTui {
             r.push_blank();
         }
 
-        // Chat log with spacing around agent blocks.
+        // Chat log — each widget separated by a blank line.
         let log_start = r.line_count();
-        let mut prev_is_agent = false;
+        let mut first = true;
         for entry in &mut self.log {
-            let is_agent = !matches!(entry, Widget::User(_));
-
-            // Blank line before agent content (assistant, tool, thinking).
-            if is_agent && !prev_is_agent {
+            if !first {
                 r.push_blank();
             }
-            // Blank line before user input after agent content.
-            if !is_agent && prev_is_agent {
-                r.push_blank();
-            }
-
+            first = false;
             match entry {
                 Widget::User(text) => text.render(r),
                 Widget::Assistant(md) => md.render(r),
@@ -578,7 +573,6 @@ impl mage_tui::App for MageTui {
                 Widget::Error(text) => text.render(r),
                 Widget::Info(text) => text.render(r),
             }
-            prev_is_agent = is_agent;
         }
         self.last_log_lines = r.line_count() - log_start;
 
