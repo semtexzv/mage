@@ -449,6 +449,11 @@ impl MageTui {
         }
     }
 
+    fn show_cancelled(&mut self) {
+        self.running = false;
+        self.spinner.set_styled(" cancelled", Style::new().fg(FG_DIM));
+    }
+
     fn rebuild_status(&mut self) {
         let u = &self.total_usage;
         let ctx = format_tokens(u.input + u.output);
@@ -737,8 +742,22 @@ impl MageTui {
                     self.rebuild_status();
                 }
             }
-            AgentEvent::AgentEnd { .. } => {
-                self.set_running(false);
+            AgentEvent::AgentEnd { messages } => {
+                // Check if the last message was aborted (cancelled).
+                let was_cancelled = messages.last().map_or(false, |m| {
+                    matches!(
+                        &m.body,
+                        mage_core::types::MessageBody::Assistant {
+                            stop_reason: llm::StopReason::Aborted,
+                            ..
+                        }
+                    )
+                });
+                if was_cancelled {
+                    self.show_cancelled();
+                } else {
+                    self.set_running(false);
+                }
             }
             _ => {}
         }
