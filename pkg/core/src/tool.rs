@@ -71,7 +71,7 @@ impl ToolContext {
     /// Convenience: send a plain text view update.
     pub fn send_text(&self, text: impl Into<String>) {
         let _ = self.update_tx.send(ToolUpdate {
-            view: crate::types::ToolView::Text(text.into()),
+            text: text.into(),
         });
     }
 

@@ -45,7 +45,7 @@ enum Msg {
 /// Each entry in the conversation log owns its rendering widget(s).
 /// Widgets are created once and mutated in place; the diff renderer
 /// detects unchanged cached lines via `Rc::ptr_eq`.
-enum LogEntry {
+enum Widget {
     /// User input. Immutable after creation.
     User(Text),
     /// Streaming assistant response.
@@ -94,35 +94,16 @@ impl ToolWidget {
     }
 
     /// Replace the streaming view with the tool's current state.
-    fn update_view(&mut self, view: &mage_core::types::ToolView) {
-        if self.done {
+    fn update(&mut self, text: &str) {
+        if self.done || text.is_empty() {
             return;
         }
-        match view {
-            mage_core::types::ToolView::Text(text) => {
-                if !text.is_empty() {
-                    self.streaming = Some(
-                        Text::new(text)
-                            .style(Style::new().dim())
-                            .bg(BG_TOOL)
-                            .padding(Padding::new(0, 1, 0, 1)),
-                    );
-                }
-            }
-            mage_core::types::ToolView::Lines(lines) => {
-                let mut t = Text::empty();
-                for line in lines {
-                    if let Some(ref prefix) = line.prefix {
-                        t.push(prefix, Style::new().dim());
-                        t.push(" ", Style::new());
-                    }
-                    t.push_plain(&line.text);
-                    t.push_plain("\n");
-                }
-                t = t.bg(BG_TOOL).padding(Padding::new(0, 1, 0, 1));
-                self.streaming = Some(t);
-            }
-        }
+        self.streaming = Some(
+            Text::new(text)
+                .style(Style::new().dim())
+                .bg(BG_TOOL)
+                .padding(Padding::new(0, 1, 0, 1)),
+        );
     }
 
     fn complete(&mut self, is_error: bool, summary: &str) {
@@ -209,7 +190,7 @@ fn make_thinking_md(width: u16) -> Markdown {
 struct MageTui {
     app: App,
     editor: Editor,
-    log: Vec<LogEntry>,
+    log: Vec<Widget>,
     running: bool,
     /// Braille spinner frame counter (cycles through SPINNER_FRAMES).
     spinner_frame: usize,
@@ -302,7 +283,7 @@ impl MageTui {
         // If a login prompt is pending, send the text there instead.
         if let Some(reply) = self.login_prompt_reply.take() {
             let _ = reply.send(trimmed.to_string());
-            self.log.push(LogEntry::Info(make_info_text(&format!("Code: {}", &trimmed[..trimmed.len().min(20)]))));
+            self.log.push(Widget::Info(make_info_text(&format!("Code: {}", &trimmed[..trimmed.len().min(20)]))));
             return;
         }
         // Slash commands that bypassed the overlay (e.g. user dismissed it).
@@ -310,7 +291,7 @@ impl MageTui {
             self.execute_command(trimmed.to_string());
             return;
         }
-        self.log.push(LogEntry::User(make_user_text(trimmed)));
+        self.log.push(Widget::User(make_user_text(trimmed)));
         self.set_running(true);
         self.app.handle.send_input(trimmed);
     }
@@ -346,14 +327,14 @@ impl MageTui {
         if args.is_empty() {
             // List available models.
             if self.available_models.is_empty() {
-                self.log.push(LogEntry::Info(make_info_text("No models available.")));
+                self.log.push(Widget::Info(make_info_text("No models available.")));
                 return;
             }
             let mut listing = String::from("Available models:");
             for m in &self.available_models {
                 listing.push_str(&format!("\n  {}/{} — {}", m.provider, m.id, m.name));
             }
-            self.log.push(LogEntry::Info(make_info_text(&listing)));
+            self.log.push(Widget::Info(make_info_text(&listing)));
             return;
         }
 
@@ -378,10 +359,10 @@ impl MageTui {
                 self.app.handle.set_model(model.clone());
                 self.current_model_name = model.name.to_string();
                 self.rebuild_status();
-                self.log.push(LogEntry::Info(make_info_text(&desc)));
+                self.log.push(Widget::Info(make_info_text(&desc)));
             }
             None => {
-                self.log.push(LogEntry::Error(make_error_text(
+                self.log.push(Widget::Error(make_error_text(
                     &format!("Unknown model '{}'. Use /model to list available models.", args),
                 )));
             }
@@ -392,7 +373,7 @@ impl MageTui {
         let auth = match &self.authenticator {
             Some(a) => a.clone(),
             None => {
-                self.log.push(LogEntry::Error(make_error_text(
+                self.log.push(Widget::Error(make_error_text(
                     "no authenticator configured for this provider",
                 )));
                 return;
@@ -403,12 +384,12 @@ impl MageTui {
         let status = auth.auth_status();
         if status == llm::AuthStatus::Authenticated {
             self.log
-                .push(LogEntry::Info(make_info_text("Already authenticated.")));
+                .push(Widget::Info(make_info_text("Already authenticated.")));
             return;
         }
 
         self.log
-            .push(LogEntry::Info(make_info_text("Starting login…")));
+            .push(Widget::Info(make_info_text("Starting login…")));
 
         // Start the login flow — get a LoginReceiver.
         let mut login_rx = auth.login();
@@ -427,28 +408,28 @@ impl MageTui {
     fn handle_login_step(&mut self, step: llm::LoginStep) {
         match step {
             llm::LoginStep::Message(msg) => {
-                self.log.push(LogEntry::Info(make_info_text(&msg)));
+                self.log.push(Widget::Info(make_info_text(&msg)));
             }
             llm::LoginStep::OpenUrl(url) => {
                 self.log
-                    .push(LogEntry::Info(make_info_text(&format!("Open: {url}"))));
+                    .push(Widget::Info(make_info_text(&format!("Open: {url}"))));
                 // Try to open the browser.
                 let _ = open_url(&url);
             }
             llm::LoginStep::Prompt { message, reply } => {
-                self.log.push(LogEntry::Info(make_info_text(&message)));
+                self.log.push(Widget::Info(make_info_text(&message)));
                 self.login_prompt_reply = Some(reply);
             }
             llm::LoginStep::Done => {
                 self.log
-                    .push(LogEntry::Info(make_info_text("Login successful.")));
+                    .push(Widget::Info(make_info_text("Login successful.")));
                 if let Some(f) = &self.on_cred_save {
                     f();
                 }
             }
             llm::LoginStep::Failed(msg) => {
                 self.log
-                    .push(LogEntry::Error(make_error_text(&format!("Login failed: {msg}"))));
+                    .push(Widget::Error(make_error_text(&format!("Login failed: {msg}"))));
                 // Clear any pending prompt on failure.
                 self.login_prompt_reply = None;
             }
@@ -476,26 +457,26 @@ impl MageTui {
 
     /// Get or create the current streaming assistant Markdown entry.
     fn current_assistant(&mut self) -> &mut Markdown {
-        let need_new = !matches!(self.log.last(), Some(LogEntry::Assistant(_)));
+        let need_new = !matches!(self.log.last(), Some(Widget::Assistant(_)));
         if need_new {
             self.log
-                .push(LogEntry::Assistant(make_assistant_md(self.width)));
+                .push(Widget::Assistant(make_assistant_md(self.width)));
         }
         match self.log.last_mut().unwrap() {
-            LogEntry::Assistant(md) => md,
+            Widget::Assistant(md) => md,
             _ => unreachable!(),
         }
     }
 
     /// Get or create the current streaming thinking Markdown entry.
     fn current_thinking(&mut self) -> &mut Markdown {
-        let need_new = !matches!(self.log.last(), Some(LogEntry::Thinking(_)));
+        let need_new = !matches!(self.log.last(), Some(Widget::Thinking(_)));
         if need_new {
             self.log
-                .push(LogEntry::Thinking(make_thinking_md(self.width)));
+                .push(Widget::Thinking(make_thinking_md(self.width)));
         }
         match self.log.last_mut().unwrap() {
-            LogEntry::Thinking(md) => md,
+            Widget::Thinking(md) => md,
             _ => unreachable!(),
         }
     }
@@ -503,7 +484,7 @@ impl MageTui {
     /// Find a tool widget by call_id.
     fn find_tool(&mut self, call_id: &str) -> Option<&mut ToolWidget> {
         for entry in self.log.iter_mut().rev() {
-            if let LogEntry::Tool(tw) = entry {
+            if let Widget::Tool(tw) = entry {
                 if tw.call_id == call_id {
                     return Some(tw);
                 }
@@ -519,7 +500,7 @@ impl MageTui {
         self.width = w;
         for entry in &mut self.log {
             match entry {
-                LogEntry::Assistant(md) | LogEntry::Thinking(md) => md.set_width(w),
+                Widget::Assistant(md) | Widget::Thinking(md) => md.set_width(w),
                 _ => {}
             }
         }
@@ -537,12 +518,12 @@ impl mage_tui::App for MageTui {
         // Chat log — each entry renders itself.
         for entry in &mut self.log {
             match entry {
-                LogEntry::User(text) => text.render(r),
-                LogEntry::Assistant(md) => md.render(r),
-                LogEntry::Thinking(md) => md.render(r),
-                LogEntry::Tool(tw) => tw.render(r),
-                LogEntry::Error(text) => text.render(r),
-                LogEntry::Info(text) => text.render(r),
+                Widget::User(text) => text.render(r),
+                Widget::Assistant(md) => md.render(r),
+                Widget::Thinking(md) => md.render(r),
+                Widget::Tool(tw) => tw.render(r),
+                Widget::Error(text) => text.render(r),
+                Widget::Info(text) => text.render(r),
             }
         }
         // Spinner line — always present, active or blank.
@@ -600,7 +581,7 @@ impl mage_tui::App for MageTui {
                 false
             }
             Event::Message(Msg::CommandError(msg)) => {
-                self.log.push(LogEntry::Error(make_error_text(&msg)));
+                self.log.push(Widget::Error(make_error_text(&msg)));
                 false
             }
             Event::Message(Msg::Tick) => {
@@ -632,7 +613,7 @@ impl MageTui {
                     }
                     llm::AssistantMessageEvent::ThinkingStart { .. } => {
                         // Force a new thinking block.
-                        self.log.push(LogEntry::Thinking(make_thinking_md(self.width)));
+                        self.log.push(Widget::Thinking(make_thinking_md(self.width)));
                     }
                     llm::AssistantMessageEvent::ThinkingDelta { delta, .. } => {
                         self.current_thinking().append(delta);
@@ -648,13 +629,13 @@ impl MageTui {
             } => {
                 let args_summary = summarize_args(&args);
                 self.log
-                    .push(LogEntry::Tool(ToolWidget::new(&tool_call_id, &tool_name, &args_summary)));
+                    .push(Widget::Tool(ToolWidget::new(&tool_call_id, &tool_name, &args_summary)));
             }
             AgentEvent::ToolExecUpdate {
                 tool_call_id, update, ..
             } => {
                 if let Some(tw) = self.find_tool(&tool_call_id) {
-                    tw.update_view(&update.view);
+                    tw.update(&update.text);
                 }
             }
             AgentEvent::ToolExecEnd {
@@ -666,11 +647,11 @@ impl MageTui {
                 } else {
                     let mut tw = ToolWidget::new(&tool_call_id, &tool_name, "");
                     tw.complete(result.is_error, &summary);
-                    self.log.push(LogEntry::Tool(tw));
+                    self.log.push(Widget::Tool(tw));
                 }
             }
             AgentEvent::AgentError { message } => {
-                self.log.push(LogEntry::Error(make_error_text(&message)));
+                self.log.push(Widget::Error(make_error_text(&message)));
             }
             AgentEvent::TurnEnd { message, .. } => {
                 // Accumulate usage from the completed turn.
