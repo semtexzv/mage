@@ -62,13 +62,18 @@ enum LogEntry {
 
 /// Composite widget for a tool invocation block.
 struct ToolWidget {
+    call_id: String,
     name: String,
     header: Text,
+    /// Streaming output — updated as the tool runs.
+    streaming: Option<Text>,
+    /// Final output — replaces streaming on completion.
     output: Option<Text>,
+    done: bool,
 }
 
 impl ToolWidget {
-    fn new(name: &str, args_summary: &str) -> Self {
+    fn new(call_id: &str, name: &str, args_summary: &str) -> Self {
         let mut header = Text::empty();
         header.push("⏵ ", Style::new().dim());
         header.push(name, Style::new().bold());
@@ -79,13 +84,42 @@ impl ToolWidget {
         header.set_padding(Padding::new(1, 1, 1, 1));
 
         Self {
+            call_id: call_id.to_string(),
             name: name.to_string(),
             header,
+            streaming: None,
             output: None,
+            done: false,
         }
     }
 
+    /// Append streaming progress text.
+    fn update(&mut self, text: &str) {
+        if self.done {
+            return;
+        }
+        let stream = self.streaming.get_or_insert_with(|| {
+            Text::new("").style(Style::new().dim()).bg(BG_TOOL).padding(Padding::new(0, 1, 0, 1))
+        });
+        // Replace with latest content (truncated to 8 lines).
+        let lines: Vec<&str> = text.lines().collect();
+        let show = lines.len().min(8);
+        let display: String = lines[lines.len() - show..].join("\n");
+        let content = if lines.len() > 8 {
+            format!("… {} lines above\n{display}", lines.len() - 8)
+        } else {
+            display
+        };
+        *stream = Text::new(content)
+            .style(Style::new().dim())
+            .bg(BG_TOOL)
+            .padding(Padding::new(0, 1, 0, 1));
+    }
+
     fn complete(&mut self, is_error: bool, summary: &str) {
+        self.done = true;
+        self.streaming = None; // drop streaming widget
+
         let bg = if is_error { BG_TOOL_ERR } else { BG_TOOL };
         let icon = if is_error { "✗ " } else { "✓ " };
         let icon_style = if is_error {
@@ -94,7 +128,6 @@ impl ToolWidget {
             Style::new().fg(Color::Green)
         };
 
-        // Rebuild header with completion status.
         self.header = Text::empty();
         self.header.push(icon, icon_style);
         self.header.push(&self.name, Style::new().bold());
@@ -119,11 +152,10 @@ impl ToolWidget {
     }
 
     fn render(&mut self, r: &mut Renderer) {
-        if self.output.is_none() {
-            // Standalone header — needs bottom padding too.
-            self.header.set_padding(Padding::new(1, 1, 1, 1));
-        }
         self.header.render(r);
+        if let Some(stream) = &mut self.streaming {
+            stream.render(r);
+        }
         if let Some(output) = &mut self.output {
             output.render(r);
         }
@@ -459,11 +491,11 @@ impl MageTui {
         }
     }
 
-    /// Find the last running tool widget.
-    fn current_tool(&mut self) -> Option<&mut ToolWidget> {
+    /// Find a tool widget by call_id.
+    fn find_tool(&mut self, call_id: &str) -> Option<&mut ToolWidget> {
         for entry in self.log.iter_mut().rev() {
             if let LogEntry::Tool(tw) = entry {
-                if tw.output.is_none() {
+                if tw.call_id == call_id {
                     return Some(tw);
                 }
             }
@@ -603,23 +635,37 @@ impl MageTui {
                 }
             }
             AgentEvent::ToolExecStart {
-                tool_name, args, ..
+                tool_call_id, tool_name, args, ..
             } => {
                 let args_summary = summarize_args(&args);
                 self.log
-                    .push(LogEntry::Tool(ToolWidget::new(&tool_name, &args_summary)));
+                    .push(LogEntry::Tool(ToolWidget::new(&tool_call_id, &tool_name, &args_summary)));
+            }
+            AgentEvent::ToolExecUpdate {
+                tool_call_id, update, ..
+            } => {
+                // Find the tool widget by call_id and stream the update.
+                if let Some(tw) = self.find_tool(&tool_call_id) {
+                    let text = update.content.iter()
+                        .filter_map(|c| match c {
+                            llm::UserContent::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !text.is_empty() {
+                        tw.update(&text);
+                    }
+                }
             }
             AgentEvent::ToolExecEnd {
-                tool_name,
-                result,
-                ..
+                tool_call_id, tool_name, result, ..
             } => {
                 let summary = tool_result_text(&result);
-                if let Some(tw) = self.current_tool() {
+                if let Some(tw) = self.find_tool(&tool_call_id) {
                     tw.complete(result.is_error, &summary);
                 } else {
-                    // Orphaned end — create a completed widget.
-                    let mut tw = ToolWidget::new(&tool_name, "");
+                    let mut tw = ToolWidget::new(&tool_call_id, &tool_name, "");
                     tw.complete(result.is_error, &summary);
                     self.log.push(LogEntry::Tool(tw));
                 }
