@@ -345,15 +345,43 @@ impl ToolResult {
 // ToolUpdate — progress from a running tool
 // ---------------------------------------------------------------------------
 
-/// Progress update sent from a tool to the UI via [`crate::tool::ToolContext`].
+/// Complete current view of a tool's output. Sent via [`crate::tool::ToolContext`].
 ///
-/// Contains the **complete current view** of the tool's output, not a delta.
-/// The TUI replaces the previous view with this one on each update.
+/// The TUI replaces the previous view on each update. Not a delta.
 /// The tool owns its display state and decides what to show.
 #[derive(Debug, Clone)]
-pub struct ToolUpdate {
-    /// Complete text to display right now (replaces previous).
+pub enum ToolView {
+    /// Plain text, rendered in the standard tool box.
+    Text(String),
+    /// Lines with optional prefix styling (e.g. line numbers, diffs).
+    Lines(Vec<ToolLine>),
+}
+
+impl ToolView {
+    /// Fallback text for non-TUI output (print mode, logging).
+    pub fn as_text(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Lines(lines) => lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n"),
+        }
+    }
+}
+
+/// A single line in a [`ToolView::Lines`] view.
+#[derive(Debug, Clone)]
+pub struct ToolLine {
+    /// Optional prefix (line number, diff marker, etc.).
+    pub prefix: Option<String>,
+    /// The line content.
     pub text: String,
+}
+
+/// Progress update sent from a tool to the UI.
+///
+/// Contains the **complete current view** — not a delta.
+#[derive(Debug, Clone)]
+pub struct ToolUpdate {
+    pub view: ToolView,
 }
 
 // ---------------------------------------------------------------------------

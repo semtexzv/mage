@@ -94,16 +94,35 @@ impl ToolWidget {
     }
 
     /// Replace the streaming view with the tool's current state.
-    fn update(&mut self, text: &str) {
-        if self.done || text.is_empty() {
+    fn update_view(&mut self, view: &mage_core::types::ToolView) {
+        if self.done {
             return;
         }
-        self.streaming = Some(
-            Text::new(text)
-                .style(Style::new().dim())
-                .bg(BG_TOOL)
-                .padding(Padding::new(0, 1, 0, 1)),
-        );
+        match view {
+            mage_core::types::ToolView::Text(text) => {
+                if !text.is_empty() {
+                    self.streaming = Some(
+                        Text::new(text)
+                            .style(Style::new().dim())
+                            .bg(BG_TOOL)
+                            .padding(Padding::new(0, 1, 0, 1)),
+                    );
+                }
+            }
+            mage_core::types::ToolView::Lines(lines) => {
+                let mut t = Text::empty();
+                for line in lines {
+                    if let Some(ref prefix) = line.prefix {
+                        t.push(prefix, Style::new().dim());
+                        t.push(" ", Style::new());
+                    }
+                    t.push_plain(&line.text);
+                    t.push_plain("\n");
+                }
+                t = t.bg(BG_TOOL).padding(Padding::new(0, 1, 0, 1));
+                self.streaming = Some(t);
+            }
+        }
     }
 
     fn complete(&mut self, is_error: bool, summary: &str) {
@@ -635,9 +654,7 @@ impl MageTui {
                 tool_call_id, update, ..
             } => {
                 if let Some(tw) = self.find_tool(&tool_call_id) {
-                    if !update.text.is_empty() {
-                        tw.update(&update.text);
-                    }
+                    tw.update_view(&update.view);
                 }
             }
             AgentEvent::ToolExecEnd {
