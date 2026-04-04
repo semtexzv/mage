@@ -683,7 +683,10 @@ async fn stream_llm(
         }
 
         if cancelled_during_stream {
-            // Drop the stream task — it will see cancel on next chunk.
+            // Emit MessageEnd for the partial message so the TUI completes.
+            assistant_msg.stop_reason = StopReason::Aborted;
+            let msg = Message::from_assistant(assistant_msg);
+            event_tx.push(AgentEvent::MessageEnd { message: msg });
             drop(stream_task);
             return Err(LoopError::Cancelled);
         }
