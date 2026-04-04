@@ -176,6 +176,21 @@ impl Provider for AnthropicProvider {
 
             let body = build_request_body(&model, &context, &options, is_oauth);
 
+            // Debug: log request body to ~/.mage/request.log
+            if let Some(home) = dirs::home_dir() {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true).append(true)
+                    .open(home.join(".mage/request.log"))
+                {
+                    let _ = writeln!(f, "=== REQUEST ===");
+                    if let Ok(json) = serde_json::to_string_pretty(&body) {
+                        let _ = writeln!(f, "{json}");
+                    }
+                    let _ = writeln!(f);
+                }
+            }
+
             let mut request = client.post(&url)
                 .header("content-type", "application/json")
                 .header("anthropic-version", "2023-06-01");

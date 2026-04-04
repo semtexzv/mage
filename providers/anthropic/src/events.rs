@@ -135,6 +135,18 @@ impl EventMapper {
 
     /// Map an Anthropic SSE event (type + JSON data) to zero or more of our events.
     pub fn map_event(&mut self, event_type: &str, data: &str) -> Vec<AssistantMessageEvent> {
+        // Debug: log raw SSE events to ~/.mage/sse.log
+        if let Some(home) = dirs::home_dir() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true).append(true)
+                .open(home.join(".mage/sse.log"))
+            {
+                let _ = writeln!(f, "event: {event_type}");
+                let _ = writeln!(f, "data: {data}");
+                let _ = writeln!(f);
+            }
+        }
         match event_type {
             "message_start" => self.on_message_start(data),
             "content_block_start" => self.on_content_block_start(data),
