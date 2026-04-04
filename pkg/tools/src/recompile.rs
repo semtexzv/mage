@@ -60,14 +60,29 @@ impl ToolHandler for RecompileHandler {
 
         let result = match result {
             Ok(r) => r,
-            Err(e) => return ToolResult::failure(format!("Compilation failed: {e}")),
+            Err(e) => return ToolResult::failure(format!("Build setup failed: {e}")),
         };
 
         if !result.success {
-            return ToolResult::failure(format!(
-                "Compilation failed:\n{}",
-                result.format_errors()
-            ));
+            let mut msg = String::from("Compilation failed:\n");
+            let errors = result.format_errors();
+            if !errors.is_empty() {
+                msg.push_str(&errors);
+            }
+            if !result.cargo_stderr.is_empty() {
+                if !errors.is_empty() {
+                    msg.push_str("\n\n");
+                }
+                // Truncate stderr to last 3000 chars to fit in context.
+                let stderr = &result.cargo_stderr;
+                if stderr.len() > 3000 {
+                    msg.push_str("...(truncated)\n");
+                    msg.push_str(&stderr[stderr.len() - 3000..]);
+                } else {
+                    msg.push_str(stderr);
+                }
+            }
+            return ToolResult::failure(msg);
         }
 
         let path = match result.executable_path {
