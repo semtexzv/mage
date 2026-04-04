@@ -430,7 +430,7 @@ fn rewrite_cargo_toml_for_snapshot(snapshot_dir: &std::path::Path) -> Result<()>
 ///
 /// Handles both `dep_name = { path = "..." }` and `dep_name = { package = "pkg", path = "..." }`.
 /// The `available` map is keyed by package name (e.g., `mage-llm`).
-fn rewrite_crate_internal_deps(
+pub fn rewrite_crate_internal_deps(
     cargo_toml: &std::path::Path,
     available: &std::collections::HashMap<String, String>,
 ) -> Result<()> {

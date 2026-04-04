@@ -71,7 +71,7 @@ pub fn apply_event(msg: &mut AssistantMessage, event: &AssistantMessageEvent) {
             msg.content.push(ContentBlock::ToolCall {
                 id: id.clone(),
                 name: name.clone(),
-                arguments: serde_json::Value::Null,
+                arguments: serde_json::Value::Object(Default::default()),
             });
         }
         AssistantMessageEvent::ToolCallDelta { .. } => {

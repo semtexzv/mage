@@ -237,8 +237,46 @@ impl Bundle {
             }
         }
 
-        // Generate Cargo.toml
-        let cargo_toml_content = self.generate_cargo_toml(template.as_ref())?;
+        // Copy core crate sources into workspace_dir/crates/<pkg_name>/
+        // so the workspace is self-contained (no relative paths back to source tree).
+        let crates_dir = workspace_dir.join("crates");
+        if crates_dir.exists() {
+            fs::remove_dir_all(&crates_dir)?;
+        }
+        for crate_path in &self.core_crates {
+            let canonical = fs::canonicalize(crate_path).unwrap_or_else(|_| crate_path.clone());
+            let pkg_name = Self::get_package_name(&canonical.join("Cargo.toml"))
+                .unwrap_or_else(|_| {
+                    canonical
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                });
+            let dest = crates_dir.join(&pkg_name);
+            Self::copy_dir_filtered(&canonical, &dest)?;
+        }
+
+        // Rewrite inter-crate path deps within copied crates.
+        // Original: `llm = { package = "mage-llm", path = "../llm" }`
+        // Rewritten: `llm = { package = "mage-llm", path = "../mage-llm" }`
+        let available: HashMap<String, String> = self.core_crates.iter()
+            .filter_map(|p| {
+                let canonical = fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                let name = Self::get_package_name(&canonical.join("Cargo.toml")).ok()?;
+                Some((name.clone(), format!("crates/{name}")))
+            })
+            .collect();
+        for entry in fs::read_dir(&crates_dir).into_iter().flatten().flatten() {
+            if entry.path().is_dir() {
+                let cargo = entry.path().join("Cargo.toml");
+                if cargo.exists() {
+                    crate::template::rewrite_crate_internal_deps(&cargo, &available)?;
+                }
+            }
+        }
+
+        // Generate Cargo.toml — core crates referenced as crates/<pkg_name>
+        let cargo_toml_content = self.generate_cargo_toml(template.as_ref(), &workspace_dir)?;
         fs::write(workspace_dir.join("Cargo.toml"), cargo_toml_content)?;
 
         // Write ad-hoc assets into src/ so they can be included via include_bytes!
@@ -607,6 +645,32 @@ impl Bundle {
         Ok(())
     }
 
+    /// Copy a crate directory, skipping `target/` and hidden dirs.
+    fn copy_dir_filtered(src: &Path, dst: &Path) -> Result<()> {
+        for entry in walkdir::WalkDir::new(src)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                !(e.file_type().is_dir()
+                    && (name == "target"
+                        || (name.starts_with('.') && name != ".cargo")))
+            })
+        {
+            let entry = entry.map_err(|e| Error::Bundle(format!("walk: {e}")))?;
+            let rel = entry.path().strip_prefix(src).unwrap_or(entry.path());
+            let dest = dst.join(rel);
+            if entry.file_type().is_dir() {
+                fs::create_dir_all(&dest)?;
+            } else {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(entry.path(), &dest)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Recursively copy a directory.
     fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         fs::create_dir_all(dst)?;
@@ -623,10 +687,8 @@ impl Bundle {
         Ok(())
     }
 
-    fn generate_cargo_toml(&self, template: &dyn Template) -> Result<String> {
+    fn generate_cargo_toml(&self, template: &dyn Template, workspace_dir: &Path) -> Result<String> {
         let resolved_shared = Self::resolve_crate_dirs(&self.shared_libs)?;
-        let resolved_core = Self::resolve_crate_dirs(&self.core_crates)?;
-        let workspace_dir = self.config.approot.join("workspaces").join(&self.id);
         // Build the root TOML document
         let mut doc = toml::Table::new();
         // [package]
@@ -665,7 +727,22 @@ features = ["rt", "time", "sync", "macros"]"#
         ws_deps.insert("tokio-util".into(), toml::Value::String("0.7".into()));
         ws_deps.insert("async-trait".into(), toml::Value::String("0.1".into()));
         workspace.insert("dependencies".into(), toml::Value::Table(ws_deps));
-        // Only add shared_libs as members (they're workspace-local by convention).
+        // Add core crates as workspace members (they live in crates/).
+        {
+            let mut members: Vec<toml::Value> = Vec::new();
+            for crate_path in &self.core_crates {
+                let canonical = std::fs::canonicalize(crate_path).unwrap_or_else(|_| crate_path.clone());
+                let name = Self::get_package_name(&canonical.join("Cargo.toml")).unwrap_or_default();
+                if !name.is_empty() {
+                    members.push(toml::Value::String(format!("crates/{name}")));
+                }
+            }
+            if !members.is_empty() {
+                workspace.insert("members".into(), toml::Value::Array(members));
+            }
+        }
+
+        // Also add shared_libs as members.
         if !resolved_shared.is_empty() {
             let members: Vec<toml::Value> = resolved_shared
                 .values()
@@ -682,13 +759,13 @@ features = ["rt", "time", "sync", "macros"]"#
         // Collect all dependencies through DependencyResolver
         let mut resolver = DependencyResolver::new(self.config.conflict_strategy);
 
-        // Core crates — always injected as path deps
-        for (name, path) in &resolved_core {
-            let rel = pathdiff::diff_paths(path, &workspace_dir).unwrap_or_else(|| path.clone());
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
+        // Core crates — referenced from the local crates/ directory
+        for crate_path in &self.core_crates {
+            let canonical = std::fs::canonicalize(crate_path).unwrap_or_else(|_| crate_path.clone());
+            let name = Self::get_package_name(&canonical.join("Cargo.toml"))?;
             let mut t = toml::Table::new();
-            t.insert("path".into(), toml::Value::String(rel_str));
-            resolver.add(name.clone(), DepSpec::Full(t), DepOrigin::Core)?;
+            t.insert("path".into(), toml::Value::String(format!("crates/{name}")));
+            resolver.add(name, DepSpec::Full(t), DepOrigin::Core)?;
         }
 
         // Template-provided deps
