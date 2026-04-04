@@ -389,13 +389,15 @@ impl AgentLoop {
                 }
 
                 Some(cmd) = cmd_rx.recv() => {
+                    // During tool execution, only abort/shutdown take effect.
+                    // All messages are deferred to after the turn completes.
                     match cmd {
-                        LoopCommand::Abort => cancel.cancel(),
-                        LoopCommand::Shutdown => cancel.cancel(),
+                        LoopCommand::Abort | LoopCommand::Shutdown => cancel.cancel(),
                         LoopCommand::SteerMessage(msg) => steer.push_back(msg),
-                        LoopCommand::FollowUpMessage(msg) => followup.push_back(msg),
-                        LoopCommand::InjectMessage(msg) => messages.push(msg),
-                        LoopCommand::SetModel(_) => {} // defer to after turn
+                        LoopCommand::InjectMessage(msg) | LoopCommand::FollowUpMessage(msg) => {
+                            followup.push_back(msg);
+                        }
+                        LoopCommand::SetModel(_) => {}
                     }
                 }
             }
