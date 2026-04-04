@@ -132,7 +132,101 @@ fn convert_messages(messages: &[Message], is_oauth: bool) -> Vec<MessageParam> {
         }
     }
 
+    // Sanitize: ensure every tool_use has a matching tool_result.
+    // If an assistant message has tool_use blocks but the next message
+    // doesn't contain all matching tool_results, inject synthetic ones.
+    sanitize_tool_use_pairing(&mut result);
+
     result
+}
+
+/// Ensure every tool_use block has a corresponding tool_result.
+///
+/// Scans the message list for assistant messages containing tool_use blocks.
+/// If the immediately following user message doesn't contain tool_results
+/// for all tool_use ids, synthetic error results are injected.
+fn sanitize_tool_use_pairing(messages: &mut Vec<MessageParam>) {
+    let mut i = 0;
+    while i < messages.len() {
+        if !matches!(messages[i].role, MessageRole::Assistant) {
+            i += 1;
+            continue;
+        }
+
+        // Collect tool_use ids from this assistant message.
+        let tool_ids: Vec<String> = match &messages[i].content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlockParam::ToolUse { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        if tool_ids.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // Check the next message for matching tool_results.
+        let next_result_ids: Vec<String> = if i + 1 < messages.len() {
+            match &messages[i + 1].content {
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlockParam::ToolResult { tool_use_id, .. } => {
+                            Some(tool_use_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Find missing tool_results.
+        let missing: Vec<&String> = tool_ids
+            .iter()
+            .filter(|id| !next_result_ids.contains(id))
+            .collect();
+
+        if !missing.is_empty() {
+            // Build synthetic tool_result blocks.
+            let synthetic: Vec<ContentBlockParam> = missing
+                .iter()
+                .map(|id| ContentBlockParam::ToolResult {
+                    tool_use_id: (*id).clone(),
+                    content: Some(ToolResultContent::Text(
+                        "Tool execution was interrupted.".to_string(),
+                    )),
+                    is_error: Some(true),
+                    cache_control: None,
+                })
+                .collect();
+
+            if i + 1 < messages.len() && matches!(messages[i + 1].role, MessageRole::User) {
+                // Append to existing user message.
+                if let MessageContent::Blocks(ref mut blocks) = messages[i + 1].content {
+                    blocks.extend(synthetic);
+                }
+            } else {
+                // Insert a new user message with the synthetic results.
+                messages.insert(
+                    i + 1,
+                    MessageParam {
+                        role: MessageRole::User,
+                        content: MessageContent::Blocks(synthetic),
+                    },
+                );
+            }
+        }
+
+        i += 2; // Skip past assistant + user pair.
+    }
 }
 
 fn convert_user_message(msg: &UserMessage) -> Option<MessageParam> {
