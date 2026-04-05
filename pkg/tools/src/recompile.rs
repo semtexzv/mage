@@ -22,14 +22,19 @@ impl Module for RecompileModule {
         vec![ToolDef {
             schema: llm::Tool {
                 name: "Recompile".into(),
-                description: "Recompile the agent binary with modules from ~/.mage/modules/. \
-                    User modules override snapshot modules with the same name. \
-                    After compilation under the monitor, the agent process restarts \
-                    with the new binary. Use after writing a new module file to \
-                    ~/.mage/modules/.".into(),
+                description: "Recompile the agent binary. Modules from ~/.mage/modules/ \
+                    listed in force_local override snapshot modules with the same name. \
+                    Unlisted local modules are added as new. After compilation under \
+                    the monitor, the agent restarts with the new binary.".into(),
                 parameters: json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "force_local": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Module names to force from ~/.mage/modules/ (overrides snapshot versions)"
+                        }
+                    },
                 }),
             },
             handler: Rc::new(RecompileHandler),
@@ -41,7 +46,17 @@ struct RecompileHandler;
 
 #[async_trait(?Send)]
 impl ToolHandler for RecompileHandler {
-    async fn execute(&self, _args: serde_json::Value, _ctx: ToolContext) -> ToolResult {
+    async fn execute(&self, args: serde_json::Value, _ctx: ToolContext) -> ToolResult {
+        let force_local: Vec<String> = args
+            .get("force_local")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let module_dirs = standard_module_dirs();
 
         // Try workspace first, then snapshot
@@ -56,7 +71,9 @@ impl ToolHandler for RecompileHandler {
                     "No workspace and no embedded snapshot — cannot recompile.",
                 );
             }
-            mage_build::template::compile_from_snapshot_data(snapshot, &module_dirs)
+            mage_build::template::compile_from_snapshot_data(
+                snapshot, &module_dirs, &force_local,
+            )
         };
 
         let result = match result {

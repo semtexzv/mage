@@ -276,6 +276,7 @@ pub fn extract_snapshot(data: &[u8], dest: &std::path::Path) -> Result<()> {
 pub fn compile_from_snapshot_data(
     data: &[u8],
     extra_module_dirs: &[PathBuf],
+    force_local: &[String],
 ) -> Result<CompilationResult> {
     let staging = std::env::temp_dir().join("mage").join(format!("rebuild-{}", std::process::id()));
     if staging.exists() {
@@ -309,25 +310,38 @@ pub fn compile_from_snapshot_data(
         all_modules.extend(module::scan_directory(&modules_dir));
     }
 
-    // 2. Scan user module dirs. Override snapshot modules by name.
+    // 2. Scan user module dirs.
+    // - Modules listed in force_local: override snapshot module with same name.
+    // - Other local modules: added as new (error if name conflicts with snapshot).
     for dir in extra_module_dirs {
         let found = module::scan_directory(dir);
+
+        // Check for conflicts within user modules themselves.
+        let mut seen = std::collections::HashSet::new();
         for m in &found {
-            // Check for conflict with another user module (error).
-            let user_conflict = found.iter()
-                .filter(|other| other.name == m.name)
-                .count();
-            if user_conflict > 1 {
+            if !seen.insert(&m.name) {
                 return Err(Error::Bundle(format!(
                     "Module conflict: '{}' defined multiple times in user modules",
                     m.name
                 )));
             }
+        }
 
-            // Override snapshot module with same name.
-            if let Some(pos) = all_modules.iter().position(|existing| existing.name == m.name) {
-                eprintln!("  upgrading module: {} (overrides snapshot)", m.name);
-                all_modules.remove(pos);
+        for m in &found {
+            let in_snapshot = all_modules.iter().any(|existing| existing.name == m.name);
+            let is_forced = force_local.contains(&m.name);
+
+            if in_snapshot && is_forced {
+                // Forced override — replace snapshot version.
+                all_modules.retain(|existing| existing.name != m.name);
+                eprintln!("  upgrading module: {} (force_local)", m.name);
+            } else if in_snapshot && !is_forced {
+                // Conflict — snapshot has it, user has it, not forced.
+                return Err(Error::Bundle(format!(
+                    "Module conflict: '{}' exists in snapshot and ~/.mage/modules/. \
+                     Use force_local to override.",
+                    m.name
+                )));
             } else {
                 eprintln!("  new module: {}", m.name);
             }
