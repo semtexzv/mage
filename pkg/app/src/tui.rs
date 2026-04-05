@@ -20,7 +20,7 @@ use mage_tui::{Editor, Event, HRule, KeyResult, Markdown};
 use crate::app::App;
 
 // ── Theme ──────────────────────────────────────────────────────
-const PAD_BLOCK: Padding = Padding::new(0, 1, 0, 1);
+const PAD_BLOCK: Padding = Padding::new(1, 1, 1, 1);
 const PAD_MD: Padding = Padding::new(0, 1, 0, 1);
 // Backgrounds — only for user input and tool blocks.
 const BG_USER: Color = Color::Rgb(30, 35, 50);
@@ -81,7 +81,7 @@ impl ToolWidget {
             header.push(&format!("  {args_summary}"), Style::new().dim());
         }
         header.set_bg(Some(BG_TOOL));
-        header.set_padding(Padding::new(0, 1, 0, 1));
+        header.set_padding(Padding::new(1, 1, 1, 1));
 
         Self {
             call_id: call_id.to_string(),
@@ -102,7 +102,7 @@ impl ToolWidget {
             Text::new(text)
                 .style(Style::new().dim())
                 .bg(BG_TOOL)
-                .padding(Padding::new(0, 1, 0, 1)),
+                .padding(Padding::new(1, 1, 1, 1)),
         );
     }
 
@@ -122,7 +122,7 @@ impl ToolWidget {
         self.header.push(icon, icon_style);
         self.header.push(&self.name, Style::new().bold());
         self.header.set_bg(Some(bg));
-        self.header.set_padding(Padding::new(0, 1, 0, 1));
+        self.header.set_padding(Padding::new(1, 1, 1, 1));
 
         if !summary.is_empty() {
             let lines: Vec<&str> = summary.lines().collect();
@@ -538,15 +538,9 @@ impl mage_tui::App for MageTui {
             info.render(r);
         }
 
-        // Chat log — blank line between each widget (margin).
-        // Widgets use side-only padding (no top/bottom) so the blank
-        // line is clean whitespace, not colored background.
-        let mut need_sep = false;
+        // Chat log — box widgets (User, Tool, Error, Info) have top/bottom
+        // padding that provides spacing. No explicit separator needed.
         for entry in &mut self.log {
-            if need_sep {
-                r.push_blank();
-            }
-            need_sep = true;
             match entry {
                 Widget::User(text) => text.render(r),
                 Widget::Assistant(md) => md.render(r),
@@ -582,7 +576,7 @@ impl mage_tui::App for MageTui {
                 }
             }
             queued_widget.set_bg(Some(Color::Rgb(40, 40, 48)));
-            queued_widget.set_padding(Padding::new(0, 1, 0, 1));
+            queued_widget.set_padding(Padding::new(1, 1, 1, 1));
             queued_widget.render(r);
         }
 
