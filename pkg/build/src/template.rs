@@ -517,6 +517,14 @@ fn rewrite_cargo_toml_for_snapshot(snapshot_dir: &std::path::Path) -> Result<()>
                         .to_string();
                     if let Some(rel) = available.get(&pkg_name) {
                         t.insert("path".into(), toml::Value::String(rel.clone()));
+                    } else {
+                        return Err(Error::Bundle(format!(
+                            "Snapshot missing crate '{}' (needed by root Cargo.toml dependency '{}'). \
+                             Available: {:?}",
+                            pkg_name,
+                            dep_key,
+                            available.keys().collect::<Vec<_>>()
+                        )));
                     }
                 }
             }
@@ -590,6 +598,11 @@ pub fn rewrite_crate_internal_deps(
                             format!("../{pkg_name}")
                         ));
                         changed = true;
+                    } else {
+                        eprintln!(
+                            "  warning: {} depends on '{}' which is not in snapshot crates/",
+                            cargo_toml.display(), pkg_name
+                        );
                     }
                 }
             }
