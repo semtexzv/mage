@@ -212,9 +212,8 @@ struct MageTui {
     hr: HRule,
     spinner: Text,
     status: Text,
-    /// Messages queued while agent is running. Rendered grayed out.
-    /// Stores (raw_text, styled_widget).
-    queued: Vec<(String, Text)>,
+    /// Messages queued while agent is running (raw text).
+    queued: Vec<String>,
 }
 
 impl MageTui {
@@ -296,12 +295,8 @@ impl MageTui {
             return;
         }
         if self.running {
-            // Agent is busy — queue the message. It's sent to the agent loop
-            // (which defers it) and shown grayed out until the turn ends.
-            let mut queued_text = Text::new(trimmed);
-            queued_text = queued_text.style(Style::new().dim());
-            queued_text = queued_text.padding(PAD_BLOCK);
-            self.queued.push((trimmed.to_string(), queued_text));
+            // Agent is busy — queue the message. Rendered grayed out.
+            self.queued.push(trimmed.to_string());
             self.app.handle.send_input(trimmed);
         } else {
             self.log.push(Widget::User(make_user_text(trimmed)));
@@ -558,18 +553,30 @@ impl mage_tui::App for MageTui {
         // queued messages so log lines never shift positions.
         let content_lines = r.line_count();
         let chrome_lines = 6; // blank + spinner + hr + editor + hr + status
-        let queued_lines = self.queued.len() * 4; // rough estimate per queued msg
+        let queued_lines = if self.queued.is_empty() { 0 } else { self.queued.len() + 2 }; // lines + padding
         let term_h = r.height() as usize;
         let spacer = term_h.saturating_sub(content_lines + queued_lines + chrome_lines);
         for _ in 0..spacer {
             r.push_blank();
         }
 
-        // Queued messages (grayed out, below spacer).
-        for (_raw, widget) in &mut self.queued {
-            if !first { r.push_blank(); }
-            first = false;
-            widget.render(r);
+        // Queued messages: gray background, arrow on first line, no spacing.
+        if !self.queued.is_empty() {
+            let mut queued_widget = Text::empty();
+            for (i, msg) in self.queued.iter().enumerate() {
+                if i == 0 {
+                    queued_widget.push("▸ ", Style::new().dim());
+                } else {
+                    queued_widget.push("  ", Style::new());
+                }
+                queued_widget.push(msg, Style::new().dim());
+                if i < self.queued.len() - 1 {
+                    queued_widget.push_plain("\n");
+                }
+            }
+            queued_widget.set_bg(Some(Color::Rgb(40, 40, 48)));
+            queued_widget.set_padding(Padding::new(1, 1, 1, 1));
+            queued_widget.render(r);
         }
 
         // Chrome: blank + spinner/blank + hr + editor + hr + status
@@ -734,7 +741,7 @@ impl MageTui {
             }
             AgentEvent::AgentEnd { messages } => {
                 // Move queued messages into the log as normal user widgets.
-                for (raw, _widget) in self.queued.drain(..) {
+                for raw in self.queued.drain(..) {
                     self.log.push(Widget::User(make_user_text(&raw)));
                 }
 
