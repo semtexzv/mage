@@ -46,7 +46,7 @@ struct RecompileHandler;
 
 #[async_trait(?Send)]
 impl ToolHandler for RecompileHandler {
-    async fn execute(&self, args: serde_json::Value, _ctx: ToolContext) -> ToolResult {
+    async fn execute(&self, args: serde_json::Value, ctx: ToolContext) -> ToolResult {
         let force_local: Vec<String> = args
             .get("force_local")
             .and_then(|v| v.as_array())
@@ -58,6 +58,8 @@ impl ToolHandler for RecompileHandler {
             .unwrap_or_default();
 
         let module_dirs = standard_module_dirs();
+
+        ctx.send_text("Compiling...");
 
         // Try workspace first, then snapshot
         let result = if let Some(root) = mage_build::template::find_workspace_root() {
