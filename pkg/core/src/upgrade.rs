@@ -67,6 +67,15 @@ pub enum UpgradeSignal {
     NoMonitor,
 }
 
+thread_local! {
+    static UPGRADE_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Check if an upgrade was signaled during this run.
+pub fn is_upgrade_pending() -> bool {
+    UPGRADE_PENDING.with(|c| c.get())
+}
+
 /// Write the new binary path to the upgrade pipe.
 ///
 /// Returns `Ready` if the pipe was written (caller should exit 42),
@@ -81,5 +90,6 @@ pub fn signal_upgrade(new_binary_path: &Path) -> Result<UpgradeSignal, String> {
     std::fs::write(&pipe_path, format!("{}\n", new_binary_path.display()))
         .map_err(|e| format!("failed to write upgrade path to {pipe_path}: {e}"))?;
 
+    UPGRADE_PENDING.with(|c| c.set(true));
     Ok(UpgradeSignal::Ready)
 }

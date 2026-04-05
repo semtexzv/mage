@@ -244,11 +244,13 @@ impl MageBuild {
 
         let workspace_dir = bundle.config.approot.join("workspaces").join(&bundle.id);
         log("resolving dependencies...");
-        let lock_status = std::process::Command::new(&cargo_path)
+        let lock_result = std::process::Command::new(&cargo_path)
             .arg("generate-lockfile")
             .current_dir(&workspace_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status();
-        if let Ok(s) = lock_status {
+        if let Ok(s) = lock_result {
             if s.success() {
                 bundle.write_snapshot_with_lock(&workspace_dir)?;
             }
@@ -409,6 +411,8 @@ pub fn compile_from_snapshot_data(
     let lock_status = std::process::Command::new(&toolchain.cargo_path)
         .arg("generate-lockfile")
         .current_dir(&staging)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
     if let Ok(s) = lock_status {
         if s.success() {

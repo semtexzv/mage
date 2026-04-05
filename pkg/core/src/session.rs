@@ -144,6 +144,12 @@ pub fn spawn(mut agent_loop: AgentLoop) -> SessionHandle {
                 }
                 Ok(()) => {
                     // AgentEnd already emitted by run().
+                    // Check if a recompile signaled an upgrade.
+                    if crate::upgrade::is_upgrade_pending() {
+                        // Give the TUI a moment to render the final tool result.
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        crate::upgrade::safe_exit(crate::upgrade::UPGRADE_EXIT_CODE);
+                    }
                 }
             }
 

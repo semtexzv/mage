@@ -126,11 +126,15 @@ impl ToolHandler for RecompileHandler {
 
         match mage_core::upgrade::signal_upgrade(&path) {
             Ok(mage_core::upgrade::UpgradeSignal::Ready) => {
-                mage_core::upgrade::safe_exit(mage_core::upgrade::UPGRADE_EXIT_CODE);
+                // Signal written. Return success — the session will exit 42
+                // after rendering the tool result.
+                ToolResult::success(format!(
+                    "Compiled {}. Restarting...",
+                    path.display()
+                ))
             }
             Ok(mage_core::upgrade::UpgradeSignal::NoMonitor) => ToolResult::success(format!(
-                "Compiled new binary at {}. \
-                 Not running under monitor — restart mage to use it.",
+                "Compiled {}. Not running under monitor — restart mage to use it.",
                 path.display()
             )),
             Err(e) => ToolResult::failure(format!("Upgrade signal failed: {e}")),

@@ -616,7 +616,7 @@ impl Bundle {
             .map_err(|e| Error::Bundle(format!("zstd finish: {e}")))?;
 
         let size = fs::metadata(&snapshot_path)?.len();
-        eprintln!("snapshot: {} ({:.1} MB)", snapshot_path.display(), size as f64 / 1_048_576.0);
+        // Note: no eprintln here — caller handles logging via the log callback.
 
         Ok(())
     }
