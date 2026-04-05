@@ -538,13 +538,8 @@ impl mage_tui::App for MageTui {
             info.render(r);
         }
 
-        // Chat log — each widget separated by a blank line.
-        let mut first = true;
+        // Chat log — widgets handle their own spacing via padding.
         for entry in &mut self.log {
-            if !first {
-                r.push_blank();
-            }
-            first = false;
             match entry {
                 Widget::User(text) => text.render(r),
                 Widget::Assistant(md) => md.render(r),
