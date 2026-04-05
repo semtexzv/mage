@@ -1,16 +1,19 @@
 [package]
-name = "mage"
+name = "mage-sdk"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "mage_sdk"
+
 [dependencies]
-mage-core = { path = "../core" }
-mage-tools = { path = "../tools" }
-mage-app = { path = "../app" }
-mage-llm = { path = "../llm" }
-mage-tui = { path = "../tui" }
-mage-build = { path = "../build" }
-refstr = { path = "../refstr" }
+mage-core.workspace = true
+mage-tools.workspace = true
+mage-app.workspace = true
+llm.workspace = true
+mage-tui.workspace = true
+mage-build.workspace = true
+refstr.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

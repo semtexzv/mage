@@ -1,4 +1,4 @@
-//! `mage` — SDK crate for the Mage agent framework.
+//! `mage-sdk` — SDK crate for the Mage agent framework.
 //!
 //! Single dependency for module authors and the host binary.
 //! Re-exports the full module tree from internal crates.
@@ -6,7 +6,7 @@
 //! # Quick start
 //!
 //! ```ignore
-//! use mage::prelude::*;
+//! use mage_sdk::prelude::*;
 //!
 //! struct MyModule;
 //!

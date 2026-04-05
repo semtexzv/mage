@@ -8,13 +8,13 @@ rust-version.workspace = true
 name = "mage_app"
 
 [dependencies]
-mage-core = { path = "../core" }
-mage-tools = { path = "../tools" }
-mage-tui = { path = "../tui" }
-mage-build = { path = "../build" }
-llm = { package = "mage-llm", path = "../llm" }
-anthropic = { package = "mage-anthropic", path = "../../providers/anthropic" }
-refstr = { path = "../refstr" }
+mage-core.workspace = true
+mage-tools.workspace = true
+mage-tui.workspace = true
+mage-build.workspace = true
+llm.workspace = true
+anthropic.workspace = true
+refstr.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 crossterm = { version = "0.28" }

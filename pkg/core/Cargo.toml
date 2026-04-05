@@ -8,8 +8,8 @@ rust-version.workspace = true
 name = "mage_core"
 
 [dependencies]
-llm = { package = "mage-llm", path = "../llm" }
-refstr = { path = "../refstr" }
+llm.workspace = true
+refstr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

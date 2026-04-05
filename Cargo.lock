@@ -866,21 +866,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mage"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "mage-app",
- "mage-build",
- "mage-core",
- "mage-llm",
- "mage-tools",
- "mage-tui",
- "refstr",
- "tokio",
-]
-
-[[package]]
 name = "mage-anthropic"
 version = "0.1.0"
 dependencies = [
@@ -968,6 +953,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "mage-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mage-app",
+ "mage-build",
+ "mage-core",
+ "mage-llm",
+ "mage-tools",
+ "mage-tui",
+ "refstr",
+ "tokio",
 ]
 
 [[package]]

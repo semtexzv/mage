@@ -84,8 +84,8 @@ fn render_produces_lines() {
     let list = SelectList::new(sample_items());
     let lines = list.render(40);
     assert!(!lines.is_empty());
-    // Should render at most the number of items (possibly fewer if scroll window)
-    assert!(lines.len() <= sample_items().len());
+    // Should render items + padding lines (top/bottom empty lines for visual spacing)
+    assert!(lines.len() <= sample_items().len() + 4);
 }
 
 #[test]

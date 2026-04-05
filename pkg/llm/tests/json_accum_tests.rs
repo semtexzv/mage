@@ -13,7 +13,8 @@ fn accumulate_and_finish() {
 #[test]
 fn finish_empty() {
     let acc = JsonAccumulator::new();
-    assert_eq!(acc.finish(), serde_json::Value::Null);
+    // Empty buffer returns {} (valid tool input), not null.
+    assert_eq!(acc.finish(), json!({}));
 }
 
 #[test]

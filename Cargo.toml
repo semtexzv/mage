@@ -18,6 +18,18 @@ edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
+# Inter-crate deps (paths defined once here)
+mage-sdk = { path = "pkg/sdk" }
+mage-core = { path = "pkg/core" }
+mage-tools = { path = "pkg/tools" }
+mage-app = { path = "pkg/app" }
+mage-tui = { path = "pkg/tui" }
+mage-build = { path = "pkg/build" }
+llm = { package = "mage-llm", path = "pkg/llm" }
+anthropic = { package = "mage-anthropic", path = "providers/anthropic" }
+refstr = { path = "pkg/refstr" }
+
+# External deps
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }

@@ -256,26 +256,11 @@ impl Bundle {
             Self::copy_dir_filtered(&canonical, &dest)?;
         }
 
-        // Rewrite inter-crate path deps within copied crates.
-        // Original: `llm = { package = "mage-llm", path = "../llm" }`
-        // Rewritten: `llm = { package = "mage-llm", path = "../mage-llm" }`
-        let available: HashMap<String, String> = self.core_crates.iter()
-            .filter_map(|p| {
-                let canonical = fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-                let name = Self::get_package_name(&canonical.join("Cargo.toml")).ok()?;
-                Some((name.clone(), format!("crates/{name}")))
-            })
-            .collect();
-        for entry in fs::read_dir(&crates_dir).into_iter().flatten().flatten() {
-            if entry.path().is_dir() {
-                let cargo = entry.path().join("Cargo.toml");
-                if cargo.exists() {
-                    crate::template::rewrite_crate_internal_deps(&cargo, &available)?;
-                }
-            }
-        }
+        // No inter-crate path rewriting needed — crates use .workspace = true.
+        // The generated root Cargo.toml defines [workspace.dependencies] with
+        // paths to crates/<pkg>, which member crates inherit.
 
-        // Generate Cargo.toml — core crates referenced as crates/<pkg_name>
+        // Generate Cargo.toml
         let cargo_toml_content = self.generate_cargo_toml(template.as_ref(), &workspace_dir)?;
         fs::write(workspace_dir.join("Cargo.toml"), cargo_toml_content)?;
 
@@ -702,8 +687,49 @@ impl Bundle {
         ws_package.insert("rust-version".into(), toml::Value::String("1.85".into()));
         workspace.insert("package".into(), toml::Value::Table(ws_package));
 
-        // [workspace.dependencies] — shared deps referenced via .workspace = true
+        // [workspace.dependencies] — both inter-crate and external deps.
+        // Inter-crate deps point to crates/<pkg> so member crates can use .workspace = true.
         let mut ws_deps = toml::Table::new();
+
+        // Inter-crate deps from the copied crates/ directory.
+        // Each crate is added to workspace.dependencies by its dep alias
+        // (the name used in [dependencies] sections of member crates).
+        // We read each crate's Cargo.toml to determine the dep alias.
+        for crate_path in &self.core_crates {
+            let canonical = std::fs::canonicalize(crate_path).unwrap_or_else(|_| crate_path.clone());
+            let pkg_name = Self::get_package_name(&canonical.join("Cargo.toml")).unwrap_or_default();
+            if pkg_name.is_empty() { continue; }
+
+            let cargo_content = std::fs::read_to_string(canonical.join("Cargo.toml")).unwrap_or_default();
+            let cargo_parsed: toml::Table = toml::from_str(&cargo_content).unwrap_or_default();
+            let lib_name = cargo_parsed.get("lib")
+                .and_then(|l| l.get("name"))
+                .and_then(|n| n.as_str());
+
+            let mut dep = toml::Table::new();
+            dep.insert("path".into(), toml::Value::String(format!("crates/{pkg_name}")));
+
+            // Determine the dep alias used by other crates to reference this one.
+            // Check root workspace Cargo.toml for how this dep is aliased.
+            // Heuristic: if lib name differs from normalized package name, check
+            // if any crate references it by lib name.
+            let dep_alias = if let Some(ln) = lib_name {
+                let normalized_pkg = pkg_name.replace('-', "_");
+                if ln != &normalized_pkg {
+                    // lib name differs — this is an alias (e.g., llm for mage-llm)
+                    dep.insert("package".into(), toml::Value::String(pkg_name.clone()));
+                    ln.to_string()
+                } else {
+                    pkg_name.clone()
+                }
+            } else {
+                pkg_name.clone()
+            };
+
+            ws_deps.insert(dep_alias, toml::Value::Table(dep));
+        }
+
+        // External deps.
         let serde_spec: toml::Table = toml::from_str(
             r#"version = "1"
 features = ["derive", "rc"]"#
@@ -747,16 +773,16 @@ features = ["rt", "time", "sync", "macros"]"#
         }
         doc.insert("workspace".into(), toml::Value::Table(workspace));
 
-        // Collect all dependencies through DependencyResolver
+        // Collect all dependencies through DependencyResolver.
+        // The binary depends on mage-sdk (which re-exports everything).
+        // Individual core crates are workspace members but NOT direct deps.
         let mut resolver = DependencyResolver::new(self.config.conflict_strategy);
 
-        // Core crates — referenced from the local crates/ directory
-        for crate_path in &self.core_crates {
-            let canonical = std::fs::canonicalize(crate_path).unwrap_or_else(|_| crate_path.clone());
-            let name = Self::get_package_name(&canonical.join("Cargo.toml"))?;
+        // SDK — the binary's sole core dependency.
+        {
             let mut t = toml::Table::new();
-            t.insert("path".into(), toml::Value::String(format!("crates/{name}")));
-            resolver.add(name, DepSpec::Full(t), DepOrigin::Core)?;
+            t.insert("workspace".into(), toml::Value::Boolean(true));
+            resolver.add("mage-sdk".to_string(), DepSpec::Full(t), DepOrigin::Core)?;
         }
 
         // Template-provided deps

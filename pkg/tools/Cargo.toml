@@ -8,14 +8,14 @@ rust-version.workspace = true
 name = "mage_tools"
 
 [dependencies]
-mage-core = { path = "../core" }
-mage-build = { path = "../build" }
-llm = { package = "mage-llm", path = "../llm" }
-refstr = { path = "../refstr" }
-dirs = "6"
+mage-core.workspace = true
+mage-build.workspace = true
+llm.workspace = true
+refstr.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["process", "fs", "io-util"] }
 async-trait.workspace = true
 globset = "0.4"
 walkdir = "2"
 regex = "1"
+dirs = "6"
