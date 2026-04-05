@@ -561,6 +561,17 @@ impl mage_tui::App for MageTui {
             widget.render(r);
         }
 
+        // Spacer: fill the gap between content and chrome so the
+        // editor sits at the bottom of the terminal. Placed BELOW
+        // the log so content lines never shift positions.
+        let content_lines = r.line_count();
+        let chrome_lines = 6; // blank + spinner + hr + editor + hr + status
+        let term_h = r.height() as usize;
+        let spacer = term_h.saturating_sub(content_lines + chrome_lines);
+        for _ in 0..spacer {
+            r.push_blank();
+        }
+
         // Chrome: blank + spinner/blank + hr + editor + hr + status
         r.push_blank();
         if self.running {
