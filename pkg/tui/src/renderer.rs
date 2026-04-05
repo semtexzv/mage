@@ -259,17 +259,22 @@ impl Renderer {
         let is_first = self.prev_lines.is_empty() && self.prev_width == 0;
         let width_changed = !is_first && w != self.prev_width;
 
-        if is_first {
-            // First frame: just output, no clearing. Content starts at current cursor.
+        let changed = if is_first {
             self.full_render(term, &lines, w, th, false);
+            true
         } else if width_changed {
-            // Width changed: must repaint everything (wrapping changes).
             self.full_render(term, &lines, w, th, true);
+            true
         } else {
-            self.diff_render(term, &lines, w, th);
-        }
+            self.diff_render(term, &lines, w, th)
+        };
 
-        self.position_cursor(term, cursor, lines.len());
+        // Only touch the cursor if we actually painted something.
+        // Otherwise cursor movement snaps the viewport when the user
+        // is scrolling through terminal scrollback.
+        if changed {
+            self.position_cursor(term, cursor, lines.len());
+        }
     }
 
     /// Move cursor to end of content and print a newline so the shell
@@ -344,7 +349,8 @@ impl Renderer {
     // All cursor movements are computed relative to where the hardware
     // cursor actually is (hw_cursor_row) and the current viewport top.
 
-    fn diff_render(&mut self, term: &mut dyn Terminal, lines: &[Line], width: u16, th: usize) {
+    /// Returns true if anything was painted, false if nothing changed.
+    fn diff_render(&mut self, term: &mut dyn Terminal, lines: &[Line], width: u16, th: usize) -> bool {
         let old_len = self.prev_lines.len();
         let max_len = old_len.max(lines.len());
 
@@ -373,15 +379,11 @@ impl Renderer {
             last_changed = (lines.len() - 1) as isize;
         }
 
-        // Nothing changed.
+        // Nothing changed — no terminal writes at all.
         if first_changed == -1 {
-            // Still need to update cursor position.
-            self.prev_vp_top = self.prev_vp_top.max(
-                lines.len().saturating_sub(th),
-            );
             self.prev_lines = lines.to_vec();
             self.prev_width = width;
-            return;
+            return false;
         }
 
         let first = first_changed as usize;
@@ -391,7 +393,7 @@ impl Renderer {
         // If first change is above the previous viewport, full re-render.
         if first < self.prev_vp_top {
             self.full_render(term, lines, width, th, true);
-            return;
+            return true;
         }
 
         // All changes are in deleted tail (nothing new to render).
@@ -400,12 +402,12 @@ impl Renderer {
                 let extra = old_len - lines.len();
                 if extra > th {
                     self.full_render(term, lines, width, th, true);
-                    return;
+                    return true;
                 }
                 let target = lines.len().saturating_sub(1);
                 if target < self.prev_vp_top {
                     self.full_render(term, lines, width, th, true);
-                    return;
+                    return true;
                 }
                 let mut buf = String::new();
                 buf.push_str(SYNC_BEGIN);
@@ -431,7 +433,7 @@ impl Renderer {
             );
             self.prev_lines = lines.to_vec();
             self.prev_width = width;
-            return;
+            return true;
         }
 
         // ── Normal diff path ────────────────────────────────────
@@ -516,6 +518,7 @@ impl Renderer {
             self.prev_lines.drain(..drain);
         }
         self.prev_width = width;
+        true
     }
 
     // ── Helpers ─────────────────────────────────────────────────
