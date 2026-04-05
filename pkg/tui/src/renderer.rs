@@ -351,15 +351,6 @@ impl Renderer {
 
     /// Returns true if anything was painted, false if nothing changed.
     fn diff_render(&mut self, term: &mut dyn Terminal, lines: &[Line], width: u16, th: usize) -> bool {
-        // Debug: log render decisions
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true).append(true)
-            .open("/tmp/mage-render.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "diff_render: lines={} prev={} hw_cursor={} vp_top={} th={}",
-                lines.len(), self.prev_lines.len(), self.hw_cursor_row, self.prev_vp_top, th);
-        }
         let old_len = self.prev_lines.len();
         let max_len = old_len.max(lines.len());
 
@@ -391,12 +382,6 @@ impl Renderer {
 
         // Nothing changed — no terminal writes at all.
         if first_changed == -1 {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true).append(true).open("/tmp/mage-render.log")
-            {
-                use std::io::Write;
-                let _ = writeln!(f, "  -> nothing changed, skip");
-            }
             self.prev_lines = lines.to_vec();
             self.prev_width = width;
             return false;
