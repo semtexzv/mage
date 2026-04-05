@@ -264,8 +264,8 @@ impl Markdown {
             }
         }
 
-        // Strip trailing blank line before bottom padding
-        if output.last().is_some_and(|l| {
+        // Strip trailing blank lines before bottom padding.
+        while output.last().is_some_and(|l| {
             let s: &str = l;
             s.is_empty() || visible_width(s) == 0
         }) {
