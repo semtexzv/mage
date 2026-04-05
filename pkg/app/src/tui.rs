@@ -531,9 +531,14 @@ impl mage_tui::App for MageTui {
     fn render(&mut self, r: &mut Renderer) {
         self.update_widths(r.width());
 
+        // Welcome line when conversation is empty.
+        if self.log.is_empty() && self.queued.is_empty() {
+            let mut info = Text::new(format!("  {}  ·  type a message below", self.current_model_name));
+            info = info.style(Style::new().fg(FG_DIM));
+            info.render(r);
+        }
+
         // Chat log — each widget separated by a blank line.
-        // No spacer: content starts at the top and grows downward.
-        // Old content scrolls into terminal scrollback naturally.
         let mut first = true;
         for entry in &mut self.log {
             if !first {
