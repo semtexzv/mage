@@ -351,15 +351,25 @@ impl Renderer {
 
     /// Returns true if anything was painted, false if nothing changed.
     fn diff_render(&mut self, term: &mut dyn Terminal, lines: &[Line], width: u16, th: usize) -> bool {
+        // Debug: log render decisions
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open("/tmp/mage-render.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "diff_render: lines={} prev={} hw_cursor={} vp_top={} th={}",
+                lines.len(), self.prev_lines.len(), self.hw_cursor_row, self.prev_vp_top, th);
+        }
         let old_len = self.prev_lines.len();
         let max_len = old_len.max(lines.len());
 
-        // Find changed range using Rc::ptr_eq for O(1) per-line comparison.
+        // Find changed range. Try Rc::ptr_eq first (O(1)), fall back to
+        // string comparison for lines from different allocations.
         let mut first_changed: isize = -1;
         let mut last_changed: isize = -1;
         for i in 0..max_len {
             let same = match (self.prev_lines.get(i), lines.get(i)) {
-                (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                (Some(a), Some(b)) => Rc::ptr_eq(a, b) || **a == **b,
                 (None, None) => true,
                 _ => false,
             };
@@ -381,6 +391,12 @@ impl Renderer {
 
         // Nothing changed — no terminal writes at all.
         if first_changed == -1 {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true).append(true).open("/tmp/mage-render.log")
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "  -> nothing changed, skip");
+            }
             self.prev_lines = lines.to_vec();
             self.prev_width = width;
             return false;
