@@ -159,36 +159,34 @@ impl AgentLoop {
     // Command handling
     // -----------------------------------------------------------------------
 
+    /// Pull all pending commands from the channel into local queues.
+    ///
+    /// - InjectMessage / SteerMessage → steering queue (between tool calls)
+    /// - FollowUpMessage → follow-up queue (after agent would stop)
+    /// - Abort/Shutdown → immediate cancel
+    /// - SetModel → immediate apply
     fn drain_commands(
         &mut self,
         run_cancel: &CancelToken,
-        steer: &mut VecDeque<Message>,
+        steering: &mut VecDeque<Message>,
         followup: &mut VecDeque<Message>,
     ) {
         while let Some(cmd) = self.cmd_rx.try_recv() {
-            self.apply_command(cmd, run_cancel, steer, followup);
-        }
-    }
-
-    fn apply_command(
-        &mut self,
-        cmd: LoopCommand,
-        run_cancel: &CancelToken,
-        steer: &mut VecDeque<Message>,
-        followup: &mut VecDeque<Message>,
-    ) {
-        match cmd {
-            // During a run, injected messages become follow-ups so they
-            // trigger a new turn after the current one completes.
-            LoopCommand::InjectMessage(msg) => followup.push_back(msg),
-            LoopCommand::SteerMessage(msg) => steer.push_back(msg),
-            LoopCommand::FollowUpMessage(msg) => followup.push_back(msg),
-            LoopCommand::Abort => run_cancel.cancel(),
-            LoopCommand::Shutdown => {
-                self.cancel.cancel();
-                run_cancel.cancel();
+            match cmd {
+                LoopCommand::InjectMessage(msg)
+                | LoopCommand::SteerMessage(msg) => {
+                    steering.push_back(msg);
+                }
+                LoopCommand::FollowUpMessage(msg) => {
+                    followup.push_back(msg);
+                }
+                LoopCommand::Abort => run_cancel.cancel(),
+                LoopCommand::Shutdown => {
+                    self.cancel.cancel();
+                    run_cancel.cancel();
+                }
+                LoopCommand::SetModel(model) => self.model = model,
             }
-            LoopCommand::SetModel(model) => self.model = model,
         }
     }
 
@@ -200,40 +198,43 @@ impl AgentLoop {
         let run_cancel = CancelToken::new();
         self.handle.set_run_cancel(&run_cancel);
 
-        // Local queues — owned by this stack frame, never shared.
-        let mut steer_queue: VecDeque<Message> = VecDeque::new();
-        let mut followup_queue: VecDeque<Message> = VecDeque::new();
+        // Two local queues, drained at different points:
+        // - steering: after tool calls complete, before next LLM call
+        // - followup: after the agent would stop (triggers new outer turn)
+        let mut steering: VecDeque<Message> = VecDeque::new();
+        let mut followup: VecDeque<Message> = VecDeque::new();
 
-        // Push prompt + any injected messages.
         self.messages.push(prompt);
-        self.drain_commands(&run_cancel, &mut steer_queue, &mut followup_queue);
+        // Pick up anything queued before run started.
+        self.drain_commands(&run_cancel, &mut steering, &mut followup);
 
         let mut turn_index: usize = 0;
         self.emit(AgentEvent::AgentStart);
 
-        // ── outer loop ───────────────────────────────────────────
+        // Seed pending with any steering messages that arrived before we started.
+        let mut pending: Vec<Message> = steering.drain(..).collect();
+
+        // ── outer loop: continues when follow-up messages arrive ──
         'outer: loop {
             if run_cancel.is_cancelled() {
-                break 'outer;
+                break;
             }
 
-            self.drain_commands(&run_cancel, &mut steer_queue, &mut followup_queue);
             let mut has_more_tool_calls = true;
 
-            // ── inner loop ───────────────────────────────────────
-            while has_more_tool_calls || !steer_queue.is_empty() {
+            // ── inner loop: tool calls + steering ─────────────────
+            while has_more_tool_calls || !pending.is_empty() {
                 if run_cancel.is_cancelled() {
                     break 'outer;
                 }
 
-                // Inject pending steering messages.
-                for msg in steer_queue.drain(..) {
+                // Inject pending messages before next LLM call.
+                for msg in pending.drain(..) {
                     self.messages.push(msg);
                 }
 
                 self.emit(AgentEvent::TurnStart { turn_index });
 
-                // Transform context via modules.
                 let base_messages = self.to_llm_messages();
                 let llm_messages = self.modules.clone().transform_context(base_messages).await;
 
@@ -262,7 +263,7 @@ impl AgentLoop {
                     break 'outer;
                 }
 
-                // ── extract tool calls ───────────────────────────
+                // ── extract + execute tool calls ─────────────────
                 let tool_calls: Vec<ToolCall> = assistant_msg
                     .content
                     .iter()
@@ -278,13 +279,10 @@ impl AgentLoop {
 
                 has_more_tool_calls = !tool_calls.is_empty();
 
-                // ── dispatch tools concurrently + collect ────────
                 let tool_results = if !tool_calls.is_empty() {
                     self.dispatch_and_collect(
                         tool_calls,
                         &run_cancel,
-                        &mut steer_queue,
-                        &mut followup_queue,
                     )
                     .await
                 } else {
@@ -298,18 +296,22 @@ impl AgentLoop {
                 });
                 turn_index += 1;
 
-                self.drain_commands(&run_cancel, &mut steer_queue, &mut followup_queue);
+                // After tool calls: pull steering messages for the next inner iteration.
+                self.drain_commands(&run_cancel, &mut steering, &mut followup);
+                pending = steering.drain(..).collect();
             }
 
-            // ── follow-up ────────────────────────────────────────
-            self.drain_commands(&run_cancel, &mut steer_queue, &mut followup_queue);
-            if !followup_queue.is_empty() {
-                for msg in followup_queue.drain(..) {
+            // Agent would stop here. Check for follow-up messages.
+            self.drain_commands(&run_cancel, &mut steering, &mut followup);
+            if !followup.is_empty() || !steering.is_empty() {
+                // Follow-ups and any steering become pending for new outer turn.
+                for msg in followup.drain(..) {
                     self.messages.push(msg);
                 }
+                pending = steering.drain(..).collect();
                 continue 'outer;
             }
-            break 'outer;
+            break;
         }
 
         // ── agent end ────────────────────────────────────────────
@@ -329,8 +331,6 @@ impl AgentLoop {
         &mut self,
         tool_calls: Vec<ToolCall>,
         cancel: &CancelToken,
-        steer: &mut VecDeque<Message>,
-        followup: &mut VecDeque<Message>,
     ) -> Vec<ToolCompletion> {
         let (result_tx, mut result_rx) =
             tokio::sync::mpsc::unbounded_channel::<ToolCompletion>();
@@ -354,11 +354,9 @@ impl AgentLoop {
 
         drop(result_tx); // close our sender copy
 
-        // Collect results while handling commands.
-        let cmd_rx = &mut self.cmd_rx;
-        let messages = &mut self.messages;
-        let event_tx = &self.event_tx;
-
+        // Collect results. Messages stay in cmd_rx channel until
+        // drain_commands is called after tool execution completes.
+        // Only abort is handled here (via cancel token).
         let mut completions: Vec<ToolCompletion> = Vec::with_capacity(total);
         let mut collected = 0;
 
@@ -367,12 +365,11 @@ impl AgentLoop {
                 biased;
 
                 _ = cancel.cancelled() => {
-                    // Tools will observe their child tokens and self-cancel.
                     break;
                 }
 
                 Some(completion) = result_rx.recv() => {
-                    event_tx.push(AgentEvent::ToolExecEnd {
+                    self.event_tx.push(AgentEvent::ToolExecEnd {
                         tool_call_id: completion.call_id.clone(),
                         tool_name: completion.name.clone(),
                         result: completion.result.clone(),
@@ -385,22 +382,9 @@ impl AgentLoop {
                         details: None,
                         is_error: completion.result.is_error,
                     };
-                    messages.push(Message::from_tool_result(trm));
+                    self.messages.push(Message::from_tool_result(trm));
                     completions.push(completion);
                     collected += 1;
-                }
-
-                Some(cmd) = cmd_rx.recv() => {
-                    // During tool execution, only abort/shutdown take effect.
-                    // All messages are deferred to after the turn completes.
-                    match cmd {
-                        LoopCommand::Abort | LoopCommand::Shutdown => cancel.cancel(),
-                        LoopCommand::SteerMessage(msg) => steer.push_back(msg),
-                        LoopCommand::InjectMessage(msg) | LoopCommand::FollowUpMessage(msg) => {
-                            followup.push_back(msg);
-                        }
-                        LoopCommand::SetModel(_) => {}
-                    }
                 }
             }
         }
