@@ -85,6 +85,14 @@ pub struct AgentLoop {
 
     /// Session-level cancellation.
     pub cancel: CancelToken,
+
+    /// Messages to inject before next LLM call (steering).
+    /// Persists across runs — not lost on cancel.
+    steering: VecDeque<Message>,
+
+    /// Messages to process after agent stops (follow-up).
+    /// Persists across runs — not lost on cancel.
+    followup: VecDeque<Message>,
 }
 
 impl AgentLoop {
@@ -119,6 +127,8 @@ impl AgentLoop {
             event_tx,
             handle,
             cancel: CancelToken::new(),
+            steering: VecDeque::new(),
+            followup: VecDeque::new(),
         };
 
         // Store schemas for the LLM — accessible via tool_registry.schemas()
@@ -165,20 +175,16 @@ impl AgentLoop {
     /// - FollowUpMessage → follow-up queue (after agent would stop)
     /// - Abort/Shutdown → immediate cancel
     /// - SetModel → immediate apply
-    fn drain_commands(
-        &mut self,
-        run_cancel: &CancelToken,
-        steering: &mut VecDeque<Message>,
-        followup: &mut VecDeque<Message>,
-    ) {
+    /// Pull all pending commands from the channel into self.steering / self.followup.
+    fn pull_commands(&mut self, run_cancel: &CancelToken) {
         while let Some(cmd) = self.cmd_rx.try_recv() {
             match cmd {
                 LoopCommand::InjectMessage(msg)
                 | LoopCommand::SteerMessage(msg) => {
-                    steering.push_back(msg);
+                    self.steering.push_back(msg);
                 }
                 LoopCommand::FollowUpMessage(msg) => {
-                    followup.push_back(msg);
+                    self.followup.push_back(msg);
                 }
                 LoopCommand::Abort => run_cancel.cancel(),
                 LoopCommand::Shutdown => {
@@ -198,21 +204,15 @@ impl AgentLoop {
         let run_cancel = CancelToken::new();
         self.handle.set_run_cancel(&run_cancel);
 
-        // Two local queues, drained at different points:
-        // - steering: after tool calls complete, before next LLM call
-        // - followup: after the agent would stop (triggers new outer turn)
-        let mut steering: VecDeque<Message> = VecDeque::new();
-        let mut followup: VecDeque<Message> = VecDeque::new();
-
         self.messages.push(prompt);
         // Pick up anything queued before run started.
-        self.drain_commands(&run_cancel, &mut steering, &mut followup);
+        self.pull_commands(&run_cancel);
 
         let mut turn_index: usize = 0;
         self.emit(AgentEvent::AgentStart);
 
         // Seed pending with any steering messages that arrived before we started.
-        let mut pending: Vec<Message> = steering.drain(..).collect();
+        let mut pending: Vec<Message> = self.steering.drain(..).collect();
 
         // ── outer loop: continues when follow-up messages arrive ──
         'outer: loop {
@@ -297,18 +297,17 @@ impl AgentLoop {
                 turn_index += 1;
 
                 // After tool calls: pull steering messages for the next inner iteration.
-                self.drain_commands(&run_cancel, &mut steering, &mut followup);
-                pending = steering.drain(..).collect();
+                self.pull_commands(&run_cancel);
+                pending = self.steering.drain(..).collect();
             }
 
             // Agent would stop here. Check for follow-up messages.
-            self.drain_commands(&run_cancel, &mut steering, &mut followup);
-            if !followup.is_empty() || !steering.is_empty() {
-                // Follow-ups and any steering become pending for new outer turn.
-                for msg in followup.drain(..) {
+            self.pull_commands(&run_cancel);
+            if !self.followup.is_empty() || !self.steering.is_empty() {
+                for msg in self.followup.drain(..).collect::<Vec<_>>() {
                     self.messages.push(msg);
                 }
-                pending = steering.drain(..).collect();
+                pending = self.steering.drain(..).collect();
                 continue 'outer;
             }
             break;
