@@ -967,6 +967,7 @@ dependencies = [
  "mage-tools",
  "mage-tui",
  "refstr",
+ "serde_json",
  "tokio",
 ]
 

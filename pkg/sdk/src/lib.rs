@@ -52,6 +52,9 @@ pub use llm;
 /// Ref-counted strings: Str, Str<Atomic>, Local, Atomic, Mode.
 pub use refstr;
 
+/// JSON (re-exported for module authors).
+pub use serde_json;
+
 /// Terminal UI: renderer, markdown, editor, keymap, styles.
 pub use mage_tui as tui;
 
@@ -107,6 +110,7 @@ pub mod prelude {
 
     // Strings
     pub use refstr::Str;
+    pub use serde_json::json;
     pub use crate::app::command::{Command, CommandRegistry, CommandError};
     pub use crate::app::app::{App, AppError};
 }

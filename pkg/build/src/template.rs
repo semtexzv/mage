@@ -162,9 +162,14 @@ impl MageBuild {
     }
 
     /// Add the standard modroot: `~/.mage/modules/`.
+    /// Optionally also adds a local project directory if `MAGE_LOCAL_MODULES` is set.
     pub fn standard_extension_dirs(mut self) -> Self {
         if let Some(home) = dirs::home_dir() {
             self.extension_dirs.push(home.join(".mage/modules"));
+        }
+        // Opt-in local modules via env var.
+        if let Ok(local) = std::env::var("MAGE_LOCAL_MODULES") {
+            self.extension_dirs.push(std::path::PathBuf::from(local));
         }
         self
     }
