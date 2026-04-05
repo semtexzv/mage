@@ -249,7 +249,6 @@ impl Markdown {
             let slice = &self.source[range.clone()];
             let hash = content_hash(slice, iw);
 
-            // Reuse if: same index, same hash, NOT the last old block (might have been incomplete)
             let reuse = i < old_len.saturating_sub(1) && self.blocks[i].hash == hash;
 
             if reuse {
@@ -264,11 +263,9 @@ impl Markdown {
             }
         }
 
-        // Strip trailing blank lines before bottom padding.
-        while output.last().is_some_and(|l| {
-            let s: &str = l;
-            s.is_empty() || visible_width(s) == 0
-        }) {
+        // Strip any remaining trailing blank lines (raw or bg-filled).
+        // visible_width == 0 catches both empty strings and ANSI-only strings.
+        while output.last().is_some_and(|l| visible_width(l) == 0) {
             output.pop();
         }
 

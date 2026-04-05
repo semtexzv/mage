@@ -538,9 +538,13 @@ impl mage_tui::App for MageTui {
             info.render(r);
         }
 
-        // Chat log — box widgets (User, Tool, Error, Info) have top/bottom
-        // padding that provides spacing. No explicit separator needed.
+        // Chat log — one blank line between every item.
+        let mut need_sep = false;
         for entry in &mut self.log {
+            if need_sep {
+                r.push_blank();
+            }
+            need_sep = true;
             match entry {
                 Widget::User(text) => text.render(r),
                 Widget::Assistant(md) => md.render(r),
