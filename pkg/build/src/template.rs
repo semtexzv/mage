@@ -57,8 +57,25 @@ const SNAPSHOT: &[u8] = include_bytes!("snapshot.tar.zst");
 
 {mod_decls}
 fn main() {{
-    // Register embedded snapshot for `mage snapshot` subcommand.
+    // Register embedded snapshot.
     mage::upgrade::set_snapshot(SNAPSHOT);
+
+    // Handle non-interactive subcommands before monitor wrapping.
+    // These don't need a TUI or agent loop.
+    if let Some(cmd) = std::env::args().nth(1) {{
+        match cmd.as_str() {{
+            "snapshot" => {{
+                let args: Vec<String> = std::env::args().skip(2).collect();
+                mage::app::snapshot_cmd::run_snapshot(&args);
+                return;
+            }}
+            "rebuild" => {{
+                mage::app::rebuild::run_rebuild();
+                return;
+            }}
+            _ => {{}}
+        }}
+    }}
 
     // Monitor wrapping: if not running under a monitor, become one.
     if !mage::upgrade::is_agent_mode() {{
@@ -207,8 +224,28 @@ impl MageBuild {
         let hash = bundle.content_hash()?;
         eprintln!("content hash: {}", &hash[..12]);
 
-        eprintln!("compiling...");
-        bundle.compile()
+        eprintln!("compiling (pass 1)...");
+        let result = bundle.compile()?;
+
+        if !result.success {
+            return Ok(result);
+        }
+
+        // Pass 2: regenerate snapshot with Cargo.lock from the first compile,
+        // then do an incremental recompile so the binary embeds the fresh snapshot.
+        let workspace_dir = bundle.config.approot.join("workspaces").join(&bundle.id);
+        let cargo_lock = workspace_dir.join("Cargo.lock");
+
+        if cargo_lock.exists() {
+            eprintln!("regenerating snapshot with Cargo.lock...");
+            bundle.write_snapshot_with_lock(&workspace_dir)?;
+
+            eprintln!("compiling (pass 2 — incremental)...");
+            let result2 = bundle.compile()?;
+            return Ok(result2);
+        }
+
+        Ok(result)
     }
 }
 
@@ -309,7 +346,8 @@ pub fn compile_from_snapshot_data(
         toolchain.cargo_path.display()
     );
 
-    eprintln!("compiling from snapshot...");
+    // Pass 1: compile with placeholder snapshot.
+    eprintln!("compiling from snapshot (pass 1)...");
     let output = std::process::Command::new(&toolchain.cargo_path)
         .arg("build")
         .arg("--message-format=json")
@@ -317,20 +355,42 @@ pub fn compile_from_snapshot_data(
         .output()
         .map_err(|e| Error::Bundle(format!("cargo: {e}")))?;
 
-    let success = output.status.success();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    if !success {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         eprintln!("{stderr}");
+        return Ok(CompilationResult {
+            success: false,
+            executable_path: None,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            cargo_stderr: stderr,
+            toolchain_metadata: toolchain.extract_metadata().unwrap_or_default(),
+            dep_info_files: Vec::new(),
+        });
     }
 
-    // Find the output binary
-    let executable_path = if success {
-        find_binary_in_target(&staging.join("target/debug"))
-    } else {
-        None
-    };
+    // Pass 2: regenerate snapshot with Cargo.lock, incremental recompile.
+    let cargo_lock = staging.join("Cargo.lock");
+    if cargo_lock.exists() {
+        eprintln!("regenerating snapshot with Cargo.lock...");
+        write_fresh_snapshot(&staging)?;
 
-    // Copy binary out of the temp dir before cleanup
+        eprintln!("compiling from snapshot (pass 2 — incremental)...");
+        let output2 = std::process::Command::new(&toolchain.cargo_path)
+            .arg("build")
+            .arg("--message-format=json")
+            .current_dir(&staging)
+            .output()
+            .map_err(|e| Error::Bundle(format!("cargo pass 2: {e}")))?;
+
+        if !output2.status.success() {
+            let stderr = String::from_utf8_lossy(&output2.stderr).to_string();
+            eprintln!("{stderr}");
+        }
+    }
+
+    // Find and copy the output binary.
+    let executable_path = find_binary_in_target(&staging.join("target/debug"));
     let final_path = if let Some(ref bin) = executable_path {
         let dest_dir = crate::default_approot().join("bin");
         std::fs::create_dir_all(&dest_dir)?;
@@ -343,14 +403,65 @@ pub fn compile_from_snapshot_data(
     };
 
     Ok(CompilationResult {
-        success,
+        success: true,
         executable_path: final_path,
         errors: Vec::new(),
         warnings: Vec::new(),
-        cargo_stderr: stderr,
+        cargo_stderr: String::new(),
         toolchain_metadata: toolchain.extract_metadata().unwrap_or_default(),
         dep_info_files: Vec::new(),
     })
+}
+
+/// Write a fresh snapshot from a compiled staging directory.
+/// Includes Cargo.toml, Cargo.lock, main.rs, modules/, crates/.
+fn write_fresh_snapshot(staging: &std::path::Path) -> Result<()> {
+    let src_dir = staging.join("src");
+    let snapshot_path = src_dir.join("snapshot.tar.zst");
+
+    let file = std::fs::File::create(&snapshot_path)?;
+    let encoder = zstd::Encoder::new(file, 3)
+        .map_err(|e| Error::Bundle(format!("zstd encoder: {e}")))?;
+    let mut tar = tar::Builder::new(encoder);
+
+    // main.rs
+    let main_rs = src_dir.join("main.rs");
+    if main_rs.exists() {
+        tar.append_path_with_name(&main_rs, "main.rs")?;
+    }
+
+    // Cargo.toml (already rewritten)
+    let cargo_toml = staging.join("Cargo.toml");
+    if cargo_toml.exists() {
+        tar.append_path_with_name(&cargo_toml, "Cargo.toml")?;
+    }
+
+    // Cargo.lock
+    let cargo_lock = staging.join("Cargo.lock");
+    if cargo_lock.exists() {
+        tar.append_path_with_name(&cargo_lock, "Cargo.lock")?;
+    }
+
+    // modules/
+    let modules_dir = src_dir.join("modules");
+    if modules_dir.is_dir() {
+        tar.append_dir_all("modules", &modules_dir)?;
+    }
+
+    // crates/ (already rewritten)
+    let crates_dir = staging.join("crates");
+    if crates_dir.is_dir() {
+        tar.append_dir_all("crates", &crates_dir)?;
+    }
+
+    let encoder = tar.into_inner()?;
+    encoder.finish()
+        .map_err(|e| Error::Bundle(format!("zstd finish: {e}")))?;
+
+    let size = std::fs::metadata(&snapshot_path)?.len();
+    eprintln!("snapshot: {} ({:.1} MB)", snapshot_path.display(), size as f64 / 1_048_576.0);
+
+    Ok(())
 }
 
 /// Rewrite path deps in Cargo.toml to point at crates/ within the snapshot dir.

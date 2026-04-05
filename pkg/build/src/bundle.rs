@@ -569,15 +569,22 @@ impl Bundle {
         Ok(map)
     }
 
-    /// Write a snapshot archive containing all sources needed to rebuild.
-    ///
-    /// The archive is written to `src/snapshot.tar.zst` in the workspace dir.
-    /// It contains:
-    /// - `main.rs` — generated entry point
-    /// - `Cargo.toml` — generated manifest
-    /// - `modules/` — extension sources (if any)
-    /// - `crates/` — full core crate source trees
+    /// Write a snapshot archive from the original source crates.
+    /// Called during `generate()` — Cargo.lock doesn't exist yet,
+    /// so this is a preliminary snapshot (no lock file).
     fn write_snapshot(&self, workspace_dir: &Path, src_dir: &Path) -> Result<()> {
+        self.write_snapshot_inner(workspace_dir, src_dir, false)
+    }
+
+    /// Write a snapshot archive from the COMPILED workspace.
+    /// Called after `compile()` — includes Cargo.lock + rewritten crates/.
+    /// This is the definitive snapshot embedded in the final binary.
+    pub fn write_snapshot_with_lock(&self, workspace_dir: &Path) -> Result<()> {
+        let src_dir = workspace_dir.join("src");
+        self.write_snapshot_inner(workspace_dir, &src_dir, true)
+    }
+
+    fn write_snapshot_inner(&self, workspace_dir: &Path, src_dir: &Path, include_lock: bool) -> Result<()> {
         let snapshot_path = src_dir.join("snapshot.tar.zst");
 
         let file = fs::File::create(&snapshot_path)?;
@@ -597,42 +604,26 @@ impl Bundle {
             tar.append_path_with_name(&cargo_path, "Cargo.toml")?;
         }
 
+        // Add Cargo.lock (only after first compile)
+        if include_lock {
+            let lock_path = workspace_dir.join("Cargo.lock");
+            if lock_path.exists() {
+                tar.append_path_with_name(&lock_path, "Cargo.lock")?;
+            }
+        }
+
         // Add extension module sources
         let modules_dir = src_dir.join("modules");
         if modules_dir.is_dir() {
             tar.append_dir_all("modules", &modules_dir)?;
         }
 
-        // Add full core crate source trees
-        for crate_dir in &self.core_crates {
-            let canonical = fs::canonicalize(crate_dir).unwrap_or_else(|_| crate_dir.clone());
-            let pkg_name = Self::get_package_name(&canonical.join("Cargo.toml"))
-                .unwrap_or_else(|_| {
-                    canonical.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                });
-
-            // Walk the crate directory, add all files except target/
-            for entry in walkdir::WalkDir::new(&canonical)
-                .into_iter()
-                .filter_entry(|e| {
-                    let name = e.file_name().to_string_lossy();
-                    // Skip target dirs and hidden dirs (except .cargo)
-                    !(e.file_type().is_dir() && (name == "target" || (name.starts_with('.') && name != ".cargo")))
-                })
-            {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let rel = entry.path().strip_prefix(&canonical).unwrap_or(entry.path());
-                let archive_path = format!("crates/{}/{}", pkg_name, rel.display());
-                tar.append_path_with_name(entry.path(), &archive_path)?;
-            }
+        // Add core crate source trees.
+        // After generate(), they're already copied to workspace_dir/crates/.
+        // Use those (already rewritten) instead of the originals.
+        let crates_dir = workspace_dir.join("crates");
+        if crates_dir.is_dir() {
+            tar.append_dir_all("crates", &crates_dir)?;
         }
 
         let encoder = tar.into_inner()?;
