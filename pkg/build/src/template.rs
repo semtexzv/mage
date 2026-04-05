@@ -307,7 +307,10 @@ pub fn compile_from_snapshot_data(
 
     // Collect all modules: snapshot modules + user modules.
     // User modules override snapshot modules with the same name.
+    // Names are normalized: hyphens → underscores (my-tool == my_tool).
     let modules_dir = src_dir.join("modules");
+
+    let normalize = |name: &str| name.replace('-', "_");
 
     // 1. Parse snapshot modules (already extracted to src/modules/).
     let mut all_modules: Vec<module::Module> = Vec::new();
@@ -321,10 +324,10 @@ pub fn compile_from_snapshot_data(
     for dir in extra_module_dirs {
         let found = module::scan_directory(dir);
 
-        // Check for conflicts within user modules themselves.
+        // Check for conflicts within user modules themselves (normalized).
         let mut seen = std::collections::HashSet::new();
         for m in &found {
-            if !seen.insert(&m.name) {
+            if !seen.insert(normalize(&m.name)) {
                 return Err(Error::Bundle(format!(
                     "Module conflict: '{}' defined multiple times in user modules",
                     m.name
@@ -333,12 +336,13 @@ pub fn compile_from_snapshot_data(
         }
 
         for m in &found {
-            let in_snapshot = all_modules.iter().any(|existing| existing.name == m.name);
-            let is_forced = force_local.contains(&m.name);
+            let norm = normalize(&m.name);
+            let in_snapshot = all_modules.iter().any(|existing| normalize(&existing.name) == norm);
+            let is_forced = force_local.iter().any(|f| normalize(f) == norm);
 
             if in_snapshot && is_forced {
                 // Forced override — replace snapshot version.
-                all_modules.retain(|existing| existing.name != m.name);
+                all_modules.retain(|existing| normalize(&existing.name) != norm);
                 eprintln!("  upgrading module: {} (force_local)", m.name);
             } else if in_snapshot && !is_forced {
                 // Conflict — snapshot has it, user has it, not forced.
