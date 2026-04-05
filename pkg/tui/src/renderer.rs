@@ -260,7 +260,7 @@ impl Renderer {
         let width_changed = !is_first && w != self.prev_width;
 
         let changed = if is_first {
-            self.full_render(term, &lines, w, th, false);
+            self.full_render(term, &lines, w, th, true);
             true
         } else if width_changed {
             self.full_render(term, &lines, w, th, true);

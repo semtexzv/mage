@@ -13,6 +13,8 @@
 //! ```
 
 use std::fmt::Write;
+
+use crate::ansi::strip_ansi;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
@@ -263,9 +265,14 @@ impl Markdown {
             }
         }
 
-        // Strip any remaining trailing blank lines (raw or bg-filled).
-        // visible_width == 0 catches both empty strings and ANSI-only strings.
-        while output.last().is_some_and(|l| visible_width(l) == 0) {
+        // Strip trailing blank lines. These can be:
+        // - empty strings
+        // - whitespace-only (left padding with no content)
+        // - ANSI codes + whitespace (bg-filled blank)
+        while output.last().is_some_and(|l| {
+            let stripped = strip_ansi(l);
+            stripped.trim().is_empty()
+        }) {
             output.pop();
         }
 
