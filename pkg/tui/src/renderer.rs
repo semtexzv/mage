@@ -338,15 +338,19 @@ impl Renderer {
         self.prev_width = width;
     }
 
-    // ── Differential render ─────────────────────────────────────
+    // ── Differential render (Pi model) ───────────────────────────
+    //
+    // Uses local mutable variables for viewport/cursor tracking (like Pi).
+    // All cursor movements are computed relative to where the hardware
+    // cursor actually is (hw_cursor_row) and the current viewport top.
 
     fn diff_render(&mut self, term: &mut dyn Terminal, lines: &[Line], width: u16, th: usize) {
         let old_len = self.prev_lines.len();
         let max_len = old_len.max(lines.len());
 
         // Find changed range using Rc::ptr_eq for O(1) per-line comparison.
-        let mut first: Option<usize> = None;
-        let mut last: Option<usize> = None;
+        let mut first_changed: isize = -1;
+        let mut last_changed: isize = -1;
         for i in 0..max_len {
             let same = match (self.prev_lines.get(i), lines.get(i)) {
                 (Some(a), Some(b)) => Rc::ptr_eq(a, b),
@@ -354,45 +358,43 @@ impl Renderer {
                 _ => false,
             };
             if !same {
-                if first.is_none() {
-                    first = Some(i);
+                if first_changed == -1 {
+                    first_changed = i as isize;
                 }
-                last = Some(i);
+                last_changed = i as isize;
             }
         }
 
-        // Detect appended lines.
-        if lines.len() > old_len {
-            if first.is_none() {
-                first = Some(old_len);
+        let appended = lines.len() > old_len;
+        if appended {
+            if first_changed == -1 {
+                first_changed = old_len as isize;
             }
-            last = Some(lines.len().saturating_sub(1));
+            last_changed = (lines.len() - 1) as isize;
         }
 
         // Nothing changed.
-        if first.is_none() {
-            self.max_lines = self.max_lines.max(lines.len());
-            self.prev_vp_top = self.max_lines.saturating_sub(th);
+        if first_changed == -1 {
+            // Still need to update cursor position.
+            self.prev_vp_top = self.prev_vp_top.max(
+                lines.len().saturating_sub(th),
+            );
             self.prev_lines = lines.to_vec();
-            if self.prev_lines.len() > MAX_PREV_LINES {
-                let drain = self.prev_lines.len() - MAX_PREV_LINES;
-                self.prev_lines.drain(..drain);
-            }
             self.prev_width = width;
             return;
         }
 
-        let first = first.unwrap();
-        let last = last.unwrap_or(first);
+        let first = first_changed as usize;
+        let last = last_changed as usize;
+        let append_start = appended && first == old_len && first > 0;
 
-        // If first change is above what was previously visible, full re-render.
-        let prev_content_vp = old_len.saturating_sub(th);
-        if first < prev_content_vp {
+        // If first change is above the previous viewport, full re-render.
+        if first < self.prev_vp_top {
             self.full_render(term, lines, width, th, true);
             return;
         }
 
-        // All changes in deleted tail — clear those lines.
+        // All changes are in deleted tail (nothing new to render).
         if first >= lines.len() {
             if old_len > lines.len() {
                 let extra = old_len - lines.len();
@@ -401,73 +403,73 @@ impl Renderer {
                     return;
                 }
                 let target = lines.len().saturating_sub(1);
+                if target < self.prev_vp_top {
+                    self.full_render(term, lines, width, th, true);
+                    return;
+                }
                 let mut buf = String::new();
                 buf.push_str(SYNC_BEGIN);
-                self.move_cursor_to(&mut buf, target, th);
+                let delta = self.compute_line_diff(target);
+                if delta > 0 { buf.push_str(&cursor_down(delta as usize)); }
+                else if delta < 0 { buf.push_str(&cursor_up((-delta) as usize)); }
                 buf.push_str(CR);
-                if extra > 0 {
-                    buf.push_str(&cursor_down(1));
-                }
+                // Clear extra lines
+                if extra > 0 { buf.push_str(&cursor_down(1)); }
                 for i in 0..extra {
                     buf.push_str(CR);
                     buf.push_str(CLEAR_LINE);
-                    if i < extra - 1 {
-                        buf.push_str(&cursor_down(1));
-                    }
+                    if i < extra - 1 { buf.push_str(&cursor_down(1)); }
                 }
-                if extra > 0 {
-                    buf.push_str(&cursor_up(extra));
-                }
+                if extra > 0 { buf.push_str(&cursor_up(extra)); }
                 buf.push_str(SYNC_END);
                 term.write(&buf);
                 term.flush();
                 self.hw_cursor_row = target;
             }
-            self.max_lines = self.max_lines.max(lines.len());
-            self.prev_vp_top = self.max_lines.saturating_sub(th);
+            self.prev_vp_top = self.prev_vp_top.max(
+                lines.len().saturating_sub(th),
+            );
             self.prev_lines = lines.to_vec();
-            if self.prev_lines.len() > MAX_PREV_LINES {
-                let drain = self.prev_lines.len() - MAX_PREV_LINES;
-                self.prev_lines.drain(..drain);
-            }
             self.prev_width = width;
             return;
         }
 
         // ── Normal diff path ────────────────────────────────────
-        let appended = lines.len() > old_len;
-        let append_start = appended && first == old_len && first > 0;
         let move_target = if append_start { first - 1 } else { first };
 
         let mut buf = String::new();
         buf.push_str(SYNC_BEGIN);
 
+        // If move_target is below the visible viewport, scroll down.
         let prev_vp_bottom = self.prev_vp_top + th.saturating_sub(1);
         if th > 0 && move_target > prev_vp_bottom {
-            let cur_screen = self
-                .hw_cursor_row
+            // Move cursor to bottom of screen first.
+            let cur_screen = self.hw_cursor_row
                 .saturating_sub(self.prev_vp_top)
                 .min(th.saturating_sub(1));
             let to_bottom = th.saturating_sub(1).saturating_sub(cur_screen);
             if to_bottom > 0 {
                 buf.push_str(&cursor_down(to_bottom));
             }
+            // Scroll by emitting newlines at the bottom.
             let scroll = move_target - prev_vp_bottom;
             for _ in 0..scroll {
                 buf.push_str(CRLF);
             }
+            // Update local tracking (like Pi's local variable mutation).
             self.hw_cursor_row = move_target;
             self.prev_vp_top += scroll;
         }
 
-        self.move_cursor_to(&mut buf, move_target, th);
+        // Move cursor to move_target.
+        let delta = self.compute_line_diff(move_target);
+        if delta > 0 { buf.push_str(&cursor_down(delta as usize)); }
+        else if delta < 0 { buf.push_str(&cursor_up((-delta) as usize)); }
+        self.hw_cursor_row = move_target;
 
-        if append_start {
-            buf.push_str(CRLF);
-        } else {
-            buf.push_str(CR);
-        }
+        buf.push_str(if append_start { CRLF } else { CR });
 
+        // Render changed lines (first to last).
         let render_end = last.min(lines.len().saturating_sub(1));
         let w = width as usize;
         for (idx, line) in lines[first..=render_end].iter().enumerate() {
@@ -481,6 +483,7 @@ impl Renderer {
 
         let mut final_row = render_end;
 
+        // If content shrunk, clear the old tail lines.
         if old_len > lines.len() {
             if render_end < lines.len().saturating_sub(1) {
                 let down = lines.len().saturating_sub(1) - render_end;
@@ -488,7 +491,7 @@ impl Renderer {
                 final_row = lines.len().saturating_sub(1);
             }
             let extra = old_len - lines.len();
-            for _ in lines.len()..old_len {
+            for _ in 0..extra {
                 buf.push_str(CRLF);
                 buf.push_str(CLEAR_LINE);
             }
@@ -501,9 +504,12 @@ impl Renderer {
         term.write(&buf);
         term.flush();
 
+        // Update state — compute viewport from where cursor ended up (like Pi).
         self.hw_cursor_row = final_row;
         self.max_lines = self.max_lines.max(lines.len());
-        self.prev_vp_top = self.max_lines.saturating_sub(th);
+        self.prev_vp_top = self.prev_vp_top.max(
+            final_row.saturating_sub(th.saturating_sub(1)),
+        );
         self.prev_lines = lines.to_vec();
         if self.prev_lines.len() > MAX_PREV_LINES {
             let drain = self.prev_lines.len() - MAX_PREV_LINES;
@@ -513,6 +519,14 @@ impl Renderer {
     }
 
     // ── Helpers ─────────────────────────────────────────────────
+
+    /// Compute cursor movement delta from current hw_cursor_row to target,
+    /// accounting for the viewport. Positive = down, negative = up.
+    fn compute_line_diff(&self, target: usize) -> isize {
+        let cur_screen = self.hw_cursor_row as isize - self.prev_vp_top as isize;
+        let tgt_screen = target as isize - self.prev_vp_top as isize;
+        tgt_screen - cur_screen
+    }
 
     /// Position the hardware cursor for an Input view, or hide it.
     fn position_cursor(
@@ -538,11 +552,12 @@ impl Renderer {
             return;
         }
         let target_row = pos.row.min(total_lines - 1);
+        let delta = self.compute_line_diff(target_row);
         let mut buf = String::new();
-        if target_row > self.hw_cursor_row {
-            buf.push_str(&cursor_down(target_row - self.hw_cursor_row));
-        } else if target_row < self.hw_cursor_row {
-            buf.push_str(&cursor_up(self.hw_cursor_row - target_row));
+        if delta > 0 {
+            buf.push_str(&cursor_down(delta as usize));
+        } else if delta < 0 {
+            buf.push_str(&cursor_up((-delta) as usize));
         }
         buf.push_str(&cursor_col(pos.col + 1));
         if !self.cursor_visible {
@@ -552,24 +567,6 @@ impl Renderer {
         term.write(&buf);
         term.flush();
         self.hw_cursor_row = target_row;
-    }
-
-    /// Move cursor to a target logical line. Uses prev_vp_top consistently
-    /// for both current and target screen positions.
-    fn move_cursor_to(&mut self, buf: &mut String, target: usize, th: usize) {
-        let max_s = th.saturating_sub(1);
-        let cur_s = self
-            .hw_cursor_row
-            .saturating_sub(self.prev_vp_top)
-            .min(max_s);
-        let tgt_s = target.saturating_sub(self.prev_vp_top).min(max_s);
-        let delta = tgt_s as isize - cur_s as isize;
-        if delta > 0 {
-            buf.push_str(&cursor_down(delta as usize));
-        } else if delta < 0 {
-            buf.push_str(&cursor_up((-delta) as usize));
-        }
-        self.hw_cursor_row = target;
     }
 }
 
