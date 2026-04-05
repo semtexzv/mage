@@ -23,7 +23,7 @@ impl Module for RecompileModule {
             schema: llm::Tool {
                 name: "Recompile".into(),
                 description: "Recompile the agent binary with any new or modified modules \
-                    from ~/.mage/modules/ and .mage/modules/. After compilation under \
+                    from ~/.mage/modules/. After compilation under \
                     the monitor, the agent process restarts with the new binary. Use after \
                     writing a new module file.".into(),
                 parameters: json!({
@@ -108,9 +108,6 @@ fn standard_module_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".mage/modules"));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        dirs.push(cwd.join(".mage/modules"));
     }
     dirs
 }

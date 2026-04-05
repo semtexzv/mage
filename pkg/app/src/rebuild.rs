@@ -4,7 +4,7 @@
 //! - **Workspace mode**: if a mage workspace is found, uses `MageBuild` (full path deps)
 //! - **Snapshot mode**: if no workspace, uses the embedded snapshot to rebuild
 //!
-//! Both scan `~/.mage/modules/` and `.mage/modules/` for user-authored modules.
+//! Scans `~/.mage/modules/` for user-authored modules.
 
 use std::path::PathBuf;
 
@@ -70,9 +70,6 @@ fn standard_module_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".mage/modules"));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        dirs.push(cwd.join(".mage/modules"));
     }
     dirs
 }

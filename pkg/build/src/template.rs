@@ -161,13 +161,10 @@ impl MageBuild {
         self
     }
 
-    /// Add the standard modroots: `~/.mage/modules/` and `.mage/modules/`.
+    /// Add the standard modroot: `~/.mage/modules/`.
     pub fn standard_extension_dirs(mut self) -> Self {
         if let Some(home) = dirs::home_dir() {
             self.extension_dirs.push(home.join(".mage/modules"));
-        }
-        if let Ok(cwd) = std::env::current_dir() {
-            self.extension_dirs.push(cwd.join(".mage/modules"));
         }
         self
     }
@@ -211,6 +208,7 @@ impl MageBuild {
         }
 
         let toolchain = Toolchain::resolve_system()?;
+        let cargo_path = toolchain.cargo_path.clone();
         eprintln!(
             "toolchain: {} / {}",
             toolchain.rustc_path.display(),
@@ -224,28 +222,21 @@ impl MageBuild {
         let hash = bundle.content_hash()?;
         eprintln!("content hash: {}", &hash[..12]);
 
-        eprintln!("compiling (pass 1)...");
-        let result = bundle.compile()?;
-
-        if !result.success {
-            return Ok(result);
-        }
-
-        // Pass 2: regenerate snapshot with Cargo.lock from the first compile,
-        // then do an incremental recompile so the binary embeds the fresh snapshot.
+        // Generate Cargo.lock without compiling, then write the complete snapshot.
         let workspace_dir = bundle.config.approot.join("workspaces").join(&bundle.id);
-        let cargo_lock = workspace_dir.join("Cargo.lock");
-
-        if cargo_lock.exists() {
-            eprintln!("regenerating snapshot with Cargo.lock...");
-            bundle.write_snapshot_with_lock(&workspace_dir)?;
-
-            eprintln!("compiling (pass 2 — incremental)...");
-            let result2 = bundle.compile()?;
-            return Ok(result2);
+        eprintln!("resolving dependencies...");
+        let lock_status = std::process::Command::new(&cargo_path)
+            .arg("generate-lockfile")
+            .current_dir(&workspace_dir)
+            .status();
+        if let Ok(s) = lock_status {
+            if s.success() {
+                bundle.write_snapshot_with_lock(&workspace_dir)?;
+            }
         }
 
-        Ok(result)
+        eprintln!("compiling...");
+        bundle.compile()
     }
 }
 
@@ -286,7 +277,7 @@ pub fn compile_from_snapshot_data(
     data: &[u8],
     extra_module_dirs: &[PathBuf],
 ) -> Result<CompilationResult> {
-    let staging = std::env::temp_dir().join(format!("mage-rebuild-{}", std::process::id()));
+    let staging = std::env::temp_dir().join("mage").join(format!("rebuild-{}", std::process::id()));
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
     }
@@ -346,8 +337,19 @@ pub fn compile_from_snapshot_data(
         toolchain.cargo_path.display()
     );
 
-    // Pass 1: compile with placeholder snapshot.
-    eprintln!("compiling from snapshot (pass 1)...");
+    // Generate Cargo.lock, then write the complete snapshot before compiling.
+    eprintln!("resolving dependencies...");
+    let lock_status = std::process::Command::new(&toolchain.cargo_path)
+        .arg("generate-lockfile")
+        .current_dir(&staging)
+        .status();
+    if let Ok(s) = lock_status {
+        if s.success() {
+            write_fresh_snapshot(&staging)?;
+        }
+    }
+
+    eprintln!("compiling from snapshot...");
     let output = std::process::Command::new(&toolchain.cargo_path)
         .arg("build")
         .arg("--message-format=json")
@@ -367,26 +369,6 @@ pub fn compile_from_snapshot_data(
             toolchain_metadata: toolchain.extract_metadata().unwrap_or_default(),
             dep_info_files: Vec::new(),
         });
-    }
-
-    // Pass 2: regenerate snapshot with Cargo.lock, incremental recompile.
-    let cargo_lock = staging.join("Cargo.lock");
-    if cargo_lock.exists() {
-        eprintln!("regenerating snapshot with Cargo.lock...");
-        write_fresh_snapshot(&staging)?;
-
-        eprintln!("compiling from snapshot (pass 2 — incremental)...");
-        let output2 = std::process::Command::new(&toolchain.cargo_path)
-            .arg("build")
-            .arg("--message-format=json")
-            .current_dir(&staging)
-            .output()
-            .map_err(|e| Error::Bundle(format!("cargo pass 2: {e}")))?;
-
-        if !output2.status.success() {
-            let stderr = String::from_utf8_lossy(&output2.stderr).to_string();
-            eprintln!("{stderr}");
-        }
     }
 
     // Find and copy the output binary.
