@@ -1,7 +1,6 @@
 # Self-Recompilation
 
-How the binary rebuilds itself. This documents the current implementation,
-not aspirational design.
+How the binary rebuilds itself.
 
 ## Overview
 
@@ -12,64 +11,70 @@ hot-swap itself via the monitor process.
 ```
 Binary (generation N)
   |
-  |-- embedded snapshot.tar.zst (214KB, 141 files)
+  |-- embedded snapshot.tar.zst (~214KB, ~141 files)
   |     contains: Cargo.toml, Cargo.lock, main.rs, crates/*, modules/*
   |
   |-- Recompile tool (or `mage rebuild`)
-  |     1. Extract snapshot to temp dir
-  |     2. Scan ~/.mage/modules/ and .mage/modules/ for new extensions
+  |     1. Extract snapshot to /tmp/mage-rebuild-<pid>/
+  |     2. Scan ~/.mage/modules/ for user modules
   |     3. Add new modules to src/modules/
   |     4. Re-render main.rs if new modules found
-  |     5. Rewrite Cargo.toml path deps
-  |     6. Compile (two-pass: first for Cargo.lock, second with fresh snapshot)
+  |     5. Generate Cargo.lock via `cargo generate-lockfile`
+  |     6. Compile with fresh snapshot embedded
   |     7. Copy binary to ~/.mage/bin/
   |
   |-- Monitor catches exit code 42
-  |     Spawns the new binary with same args
+  |     1. Spawns new binary
+  |     2. New binary reports HEALTHY or UNHEALTHY      [NOT YET IMPLEMENTED]
+  |     3. Monitor commits or rolls back                [NOT YET IMPLEMENTED]
+  |     4. New binary resumes session                   [NOT YET IMPLEMENTED]
   |
 Binary (generation N+1)
-  |-- embedded snapshot.tar.zst (fresh, includes Cargo.lock)
+  |-- embedded snapshot.tar.zst (fresh)
   |-- can rebuild itself the same way
 ```
 
-## Entry Points
+## Module discovery
 
-### `cargo xtask bootstrap`
+Only `~/.mage/modules/` is scanned. No project-local modules.
+This avoids path issues when the binary is run from different directories
+and ensures that with global modules, the latest committed version always wins.
 
-Initial build from workspace sources. Used during development.
-
-```
-workspace root (pkg/*, providers/*)
-  -> MageBuild::new(&workspace_root)
-       .name("mage-bootstrap")
-       .config(Config { approot: target/mage-bootstrap })
-       .extension_dir(modules/)
-       .compile()
-  -> binary at target/mage-bootstrap/bin/mage-bootstrap-<petname>
-```
-
-### `mage rebuild`
-
-Subcommand handled before the monitor. Two modes:
-
-**Workspace mode** (if workspace root found):
-```
-MageBuild::new(&root).standard_extension_dirs().compile()
-```
-
-**Snapshot mode** (no workspace — e.g., running from /tmp):
-```
-compile_from_snapshot_data(embedded_snapshot, &module_dirs)
-```
-
-### Recompile tool
-
-LLM-callable tool. Same logic as `mage rebuild`, but:
-- On success under monitor: calls `safe_exit(42)` -> monitor spawns new binary
-- On success without monitor: returns tool result with binary path
-- On failure: returns compilation errors to the LLM (last 3000 chars of stderr)
+Module conflicts (two modules providing the same tool name) should be
+detected and reported as an error. [NOT YET IMPLEMENTED]
 
 ## Compilation Pipeline
+
+### Workspace dependencies (planned refactor)
+
+Currently, inter-crate deps use relative paths in each crate's Cargo.toml:
+```toml
+# pkg/core/Cargo.toml
+llm = { package = "mage-llm", path = "../llm" }
+```
+
+This requires fragile path rewriting when crates are copied to a snapshot.
+
+**Planned:** move ALL inter-crate deps to `[workspace.dependencies]` in the
+root Cargo.toml. Member crates use `dep.workspace = true`:
+
+```toml
+# Root Cargo.toml
+[workspace.dependencies]
+mage-core = { path = "pkg/core" }
+llm = { package = "mage-llm", path = "pkg/llm" }
+refstr = { path = "pkg/refstr" }
+# ...
+
+# pkg/core/Cargo.toml
+[dependencies]
+llm.workspace = true
+refstr.workspace = true
+```
+
+This means only the ROOT Cargo.toml needs path rewriting during snapshot
+extraction. Individual crate Cargo.toml files are never modified.
+Eliminates `rewrite_crate_internal_deps` entirely.
 
 ### MageBuild (workspace path)
 
@@ -77,40 +82,35 @@ LLM-callable tool. Same logic as `mage rebuild`, but:
 
 ```rust
 MageBuild::new(workspace_root)
-    .standard_extension_dirs()  // ~/.mage/modules/ + .mage/modules/
+    .standard_extension_dirs()  // ~/.mage/modules/
     .compile()
 ```
 
-Internally:
+Steps:
 1. Verify workspace root exists
-2. Scan extension directories for .rs modules
-3. Create `Bundle` with 9 core crates + MageTemplate + modules
+2. Scan `~/.mage/modules/` for .rs modules
+3. Create `Bundle` with core crates + MageTemplate + modules
 4. `bundle.generate()`:
    a. Copy core crate sources to `~/.mage/workspaces/<name>/crates/<pkg>/`
-   b. Rewrite inter-crate path deps (e.g., `path = "../llm"` -> `path = "../mage-llm"`)
-   c. Generate Cargo.toml with workspace members, deps, shared workspace deps
-   d. Render main.rs from MageTemplate
-   e. Write preliminary snapshot (without Cargo.lock)
-5. Pass 1: `bundle.compile()` — cargo build
-6. Regenerate snapshot WITH Cargo.lock from the compiled workspace
-7. Pass 2: incremental recompile (only binary crate changes — snapshot asset changed)
+   b. Generate root Cargo.toml (rewrite workspace.dependencies paths to crates/)
+   c. Render main.rs from MageTemplate
+   d. Generate Cargo.lock via `cargo generate-lockfile`
+   e. Write snapshot (includes Cargo.lock)
+5. Compile — single pass (snapshot is already complete)
 
 ### compile_from_snapshot_data (snapshot path)
 
 `pkg/build/src/template.rs`
 
-1. Extract snapshot.tar.zst to temp dir
+1. Extract snapshot.tar.zst to `/tmp/mage-rebuild-<pid>/`
 2. Restructure: main.rs -> src/main.rs, modules/ -> src/modules/
-3. Scan extra module dirs, copy new .rs files to src/modules/
+3. Scan `~/.mage/modules/`, copy new .rs files to src/modules/
 4. If new modules found: re-render main.rs via MageTemplate
-5. Write snapshot data to src/snapshot.tar.zst (placeholder for include_bytes!)
-6. Rewrite root Cargo.toml path deps -> crates/<pkg>
-7. Rewrite each crate's internal path deps -> ../<pkg>
-8. Add workspace members for all crates
-9. Pass 1: cargo build
-10. Regenerate fresh snapshot (with Cargo.lock + rewritten sources)
-11. Pass 2: incremental recompile
-12. Copy final binary to ~/.mage/bin/
+5. Rewrite root Cargo.toml workspace.dependencies paths to crates/<pkg>
+6. Generate fresh Cargo.lock
+7. Write fresh snapshot (includes new modules + Cargo.lock)
+8. Compile
+9. Copy binary to ~/.mage/bin/
 
 ## Snapshot Format
 
@@ -118,20 +118,17 @@ Internally:
 
 ```
 main.rs                          Generated entry point
-Cargo.toml                       Generated manifest (self-contained path deps)
+Cargo.toml                       Generated manifest (workspace.dependencies with crates/ paths)
 Cargo.lock                       Pinned transitive dependencies
-modules/                         User extension sources (if any)
+modules/                         User module sources (if any)
   my_tool.rs
-crates/                          All 9 core crate source trees
-  mage/                          SDK crate
-    Cargo.toml
+crates/                          All core crate source trees
+  mage-sdk/                     SDK re-export crate (renamed from mage)
+    Cargo.toml                   Uses dep.workspace = true (no relative paths)
     src/lib.rs
   mage-core/
-    Cargo.toml
-    src/agent_loop.rs
-    src/module.rs
-    src/tool.rs
-    ...
+    Cargo.toml                   Uses dep.workspace = true
+    src/...
   mage-tools/
   mage-llm/
   mage-tui/
@@ -141,69 +138,25 @@ crates/                          All 9 core crate source trees
   refstr/
 ```
 
-**Key property:** all path deps in Cargo.toml files are relative to the snapshot
-root (crates/<pkg>). No references to external paths. The snapshot is self-contained
-— it can be extracted anywhere and compiled with only a Rust toolchain.
+**Key property:** only the root Cargo.toml has `path = "crates/..."` entries.
+All crate Cargo.toml files use `dep.workspace = true` — no relative paths,
+never modified during extraction.
 
-**Size:** ~214KB compressed. 141 files. Includes Cargo.lock (67KB).
+## SDK Crate Naming
 
-## Path Dependency Rewriting
+The SDK crate should be renamed from `mage` to `mage-sdk` to avoid the
+package name collision with the generated binary.
 
-Core crates reference each other via path deps in their Cargo.toml files.
-In the original workspace, these are relative paths like `path = "../llm"`.
-In the snapshot, all crates live under `crates/<package-name>/`.
-
-Two rewrites happen:
-
-### Root Cargo.toml
-
-```toml
-# Before (original workspace):
-[dependencies.mage-llm]
-path = "../../../../pkg/llm"
-
-# After (snapshot):
-[dependencies.mage-llm]
-path = "crates/mage-llm"
+In user-authored modules, the SDK is accessed as:
+```rust
+use mage_sdk::prelude::*;
 ```
 
-### Inter-crate deps
-
+Or with a Cargo alias:
 ```toml
-# Before (in crates/mage-core/Cargo.toml):
-[dependencies]
-llm = { package = "mage-llm", path = "../llm" }
-
-# After:
-[dependencies]
-llm = { package = "mage-llm", path = "../mage-llm" }
+# In generated Cargo.toml
+sdk = { package = "mage-sdk", path = "crates/mage-sdk" }
 ```
-
-The rewrite handles the `package = "..."` rename pattern.
-It matches by package name against the available crates in the snapshot.
-
-### Workspace metadata
-
-The generated Cargo.toml includes:
-
-```toml
-[workspace]
-members = ["crates/mage", "crates/mage-core", ...]
-
-[workspace.package]
-edition = "2024"
-rust-version = "1.85"
-
-[workspace.dependencies]
-serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
-tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
-tokio-util = "0.7"
-async-trait = "0.1"
-```
-
-This matches the workspace root Cargo.toml so crates that use
-`edition.workspace = true` or `serde.workspace = true` resolve correctly.
 
 ## Generated main.rs
 
@@ -213,110 +166,105 @@ MageTemplate renders:
 const SNAPSHOT: &[u8] = include_bytes!("snapshot.tar.zst");
 
 fn main() {
-    mage::upgrade::set_snapshot(SNAPSHOT);
+    mage_sdk::upgrade::set_snapshot(SNAPSHOT);
 
     // Subcommands (no TUI needed)
-    match arg { "snapshot" => ..., "rebuild" => ... }
+    match std::env::args().nth(1).as_deref() {
+        Some("snapshot") => { /* list/extract */ },
+        Some("rebuild") => { /* recompile */ },
+        _ => {}
+    }
 
     // Monitor wrapping
-    if !is_agent_mode() { run_monitor(); }
+    if !mage_sdk::upgrade::is_agent_mode() { run_monitor(); }
 
     // Agent
     run_local(|| async {
-        let modules = mage::tools::all();
-        // + any extension modules via #[path = "modules/..."]
+        let mut modules = mage_sdk::tools::all();
+        // + extension modules
         run(modules).await;
     });
 }
 ```
 
-If extension modules are discovered, the template adds:
-```rust
-#[path = "modules/my_tool.rs"]
-mod my_tool;
-
-// ... inside main:
-modules.extend(my_tool::modules());
-```
-
 ## Monitor Protocol
 
-The monitor is the binary itself. On startup:
+The binary has two modes based on `MAGE_AGENT_PIPE_FD`:
 
-1. Check `MAGE_AGENT_PIPE_FD` env var
-2. If not set: I am the monitor
-   - Create temp file for upgrade pipe
-   - Spawn self as child with `MAGE_AGENT_PIPE_FD=<path>`
-   - Wait for child exit
-   - If exit code 42: read path from pipe, spawn new binary, loop
-   - Other exit code: pass through
-3. If set: I am the agent, run normally
+- **Not set:** monitor mode — spawn self as child, supervise
+- **Set:** agent mode — run normally
 
-### Upgrade flow
+### Upgrade flow (current)
 
 ```
-Agent: compile new binary -> signal_upgrade(path)
-  |
-  |-- writes path to MAGE_AGENT_PIPE_FD temp file
-  |-- calls safe_exit(42)
-  |     (safe_exit calls TUI restore hook before process::exit)
-  |
-Monitor: sees exit 42
-  |-- reads path from temp file
-  |-- validates binary exists
-  |-- spawns new binary with same args + inherited stdio
-  |-- loops (supervises new child)
+Agent: compile new binary -> signal_upgrade(path) -> safe_exit(42)
+Monitor: exit 42 -> read path from pipe -> spawn new binary
 ```
 
-### Without monitor
+### Upgrade flow (planned)
 
-If `MAGE_AGENT_PIPE_FD` is not set (standalone run, -p mode):
-- `signal_upgrade` returns `NoMonitor`
-- Binary path printed to stderr
-- Agent continues running current version
-- User must restart manually
+```
+Agent: compile new binary -> save session -> signal_upgrade(path) -> safe_exit(42)
+Monitor: exit 42 -> read path from pipe -> spawn new binary with health check
+New binary: load session -> verify tools -> ask LLM "are you working?" -> HEALTHY
+Monitor: commit to new generation (append to generations.jsonl)
+```
 
-## Known Limitations
+On UNHEALTHY or timeout:
+```
+Monitor: kill new binary -> append "failed" to generations.jsonl -> spawn previous binary
+Previous binary: resumes session
+```
 
-### Not yet implemented
+## Versioning (planned)
 
-- **Session persistence**: conversation lost on recompile. New binary starts fresh.
-- **Health check**: monitor blindly trusts new binary. No LLM verification or rollback.
-- **generations.jsonl**: no version tracking or rollback history.
-- **SDK on crates.io**: snapshots embed full source trees (~214KB). With registry deps
-  they would shrink to ~5KB (only extensions + Cargo.lock + metadata).
+`~/.mage/bin/generations.jsonl` — append-only log:
 
-### Edge cases in path rewriting
+```json
+{"name":"mage-brave-eagle","generation":1,"status":"healthy","timestamp":"..."}
+{"name":"mage-happy-wolf","generation":2,"status":"healthy","parent":"mage-brave-eagle"}
+{"name":"mage-quick-fox","generation":3,"status":"pending","parent":"mage-happy-wolf"}
+{"name":"mage-quick-fox","generation":3,"status":"failed"}
+{"name":"mage-happy-wolf","generation":2,"status":"healthy"}
+```
 
-- `[target.'cfg(...)'.dependencies]` path deps: NOT rewritten.
-  Only `[dependencies]` section is processed.
-- `[patch.*]` with path deps: NOT rewritten.
-  Currently no crates use patches.
-- Missing crates in snapshot: silently skipped (no error).
-  Could cause confusing compile errors downstream.
-- Build scripts (`build.rs`) that embed paths: NOT handled.
-  `env!("CARGO_MANIFEST_DIR")` will differ between original and snapshot builds.
+Last line = current version. Rollback = append previous version as healthy.
 
-### Two-pass compilation overhead
+## Current Limitations
 
-Every build does two cargo invocations:
-1. Full compile (all deps from scratch if no cache)
-2. Incremental recompile (only the binary crate, ~2-5 seconds)
+### Path rewriting (to be eliminated)
 
-Pass 2 is fast because only `src/snapshot.tar.zst` changed (an asset file).
-The overhead is negligible for interactive use but doubles CI build time.
+Currently walks every crate's Cargo.toml to rewrite path deps.
+Will be replaced by workspace.dependencies approach (see above).
+
+Remaining edge cases after the refactor:
+- `[workspace.dependencies]` paths need rewriting in root Cargo.toml only
+- `[patch]` sections with path deps: not handled (none currently used)
+- Build scripts with embedded paths: not handled
+
+### Two-pass compilation
+
+Currently does two cargo invocations (compile + recompile with snapshot).
+Planned fix: use `cargo generate-lockfile` to get Cargo.lock without compiling,
+then write the complete snapshot before the single compile pass.
+
+### Session continuity
+
+Not implemented. Conversation lost on recompile. Planned:
+- JSONL session format (id/parentId tree)
+- Save before exit 42
+- Load on startup (check session file path in env/args)
 
 ## Code Locations
 
 | Component | File |
 |---|---|
-| MageBuild (unified entry) | `pkg/build/src/template.rs` |
-| MageTemplate (main.rs gen) | `pkg/build/src/template.rs` |
+| MageBuild | `pkg/build/src/template.rs` |
+| MageTemplate | `pkg/build/src/template.rs` |
 | compile_from_snapshot_data | `pkg/build/src/template.rs` |
 | Bundle::generate() | `pkg/build/src/bundle.rs` |
 | Bundle::compile() | `pkg/build/src/bundle.rs` |
-| write_snapshot_inner | `pkg/build/src/bundle.rs` |
-| Path dep rewriting | `pkg/build/src/template.rs` |
+| write_snapshot | `pkg/build/src/bundle.rs` |
 | Module scanning | `pkg/build/src/module.rs` |
 | Dependency resolution | `pkg/build/src/deps.rs` |
 | Monitor loop | `pkg/app/src/monitor.rs` |
@@ -324,3 +272,15 @@ The overhead is negligible for interactive use but doubles CI build time.
 | Rebuild subcommand | `pkg/app/src/rebuild.rs` |
 | Recompile tool | `pkg/tools/src/recompile.rs` |
 | Snapshot subcommand | `pkg/app/src/snapshot_cmd.rs` |
+
+## TODO
+
+- [ ] Refactor to workspace.dependencies (eliminate per-crate path rewriting)
+- [ ] Rename SDK crate: mage -> mage-sdk
+- [ ] Use `cargo generate-lockfile` instead of two-pass compile
+- [ ] Only scan ~/.mage/modules/ (remove .mage/modules/ and project-local)
+- [ ] Module conflict detection (duplicate tool names)
+- [ ] Health check in monitor (HEALTHY/UNHEALTHY pipe)
+- [ ] Session persistence (save before exit 42, load on startup)
+- [ ] generations.jsonl (version tracking, rollback)
+- [ ] Wrapper script for /usr/local/bin/mage
