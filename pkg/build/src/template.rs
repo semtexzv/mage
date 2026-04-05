@@ -195,7 +195,8 @@ impl MageBuild {
         self
     }
 
-    /// Compile and return the result.
+    /// Synchronous compile. Blocks on cargo build.
+    /// Use `prepare_and_compile_async` for non-blocking builds.
     pub fn compile(self) -> Result<CompilationResult> {
         let log = &self.log;
         let root = &self.workspace_root;
@@ -259,6 +260,69 @@ impl MageBuild {
         log("compiling...");
         bundle.compile()
     }
+
+    /// Generate workspace without compiling. Returns (workspace_dir, cargo_path).
+    /// The caller can then run `cargo build` asynchronously.
+    pub fn generate_workspace(self) -> Result<(PathBuf, PathBuf)> {
+        let log = &self.log;
+        let root = &self.workspace_root;
+
+        if !root.join("Cargo.toml").exists() {
+            return Err(Error::Bundle(format!(
+                "workspace root not found: {}", root.display()
+            )));
+        }
+
+        let mut modules = Vec::new();
+        for dir in &self.extension_dirs {
+            let found = module::scan_directory(dir);
+            for m in &found {
+                log(&format!("found module: {} ({})", m.name, m.path.display()));
+            }
+            modules.extend(found);
+        }
+        if modules.is_empty() {
+            log("no extension modules (built-in tools always included)");
+        }
+
+        let config = self.config.unwrap_or_default();
+        let mut bundle = Bundle::new(&self.name).with_config(config);
+
+        for rel in CORE_CRATES {
+            bundle = bundle.add_core_crate(root.join(rel));
+        }
+        bundle = bundle.with_template(MageTemplate);
+
+        for m in modules {
+            bundle = bundle.add_module(m);
+        }
+
+        let toolchain = Toolchain::resolve_system()?;
+        let cargo_path = toolchain.cargo_path.clone();
+        log(&format!("toolchain: {}", toolchain.rustc_path.display()));
+        bundle = bundle.with_toolchain(toolchain);
+
+        log("generating workspace...");
+        bundle.generate()?;
+
+        let workspace_dir = bundle.config.approot.join("workspaces").join(&bundle.id);
+
+        // Generate lockfile.
+        log("resolving dependencies...");
+        let _ = std::process::Command::new(&cargo_path)
+            .arg("generate-lockfile")
+            .current_dir(&workspace_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        // Write snapshot with lockfile.
+        if workspace_dir.join("Cargo.lock").exists() {
+            bundle.write_snapshot_with_lock(&workspace_dir)?;
+        }
+
+        Ok((workspace_dir, cargo_path))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +342,103 @@ pub fn list_snapshot(data: &[u8]) -> Result<Vec<String>> {
         paths.push(format!("{:>8}  {}", format_size(size), path.display()));
     }
     Ok(paths)
+}
+
+/// Prepare a workspace from snapshot without compiling.
+/// Returns (workspace_dir, cargo_path) for async compilation.
+pub fn prepare_from_snapshot(
+    data: &[u8],
+    extra_module_dirs: &[PathBuf],
+    force_local: &[String],
+) -> Result<(PathBuf, PathBuf)> {
+    let staging = std::env::temp_dir().join("mage").join(format!("rebuild-{}", std::process::id()));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+
+    extract_snapshot(data, &staging)?;
+
+    let src_dir = staging.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+
+    let main_rs = staging.join("main.rs");
+    if main_rs.exists() {
+        std::fs::rename(&main_rs, src_dir.join("main.rs"))?;
+    }
+
+    let modules_src = staging.join("modules");
+    if modules_src.is_dir() {
+        std::fs::rename(&modules_src, src_dir.join("modules"))?;
+    }
+
+    // Module merging (same logic as compile_from_snapshot_data).
+    let modules_dir = src_dir.join("modules");
+    let normalize = |name: &str| name.replace('-', "_");
+
+    let mut all_modules: Vec<module::Module> = Vec::new();
+    if modules_dir.is_dir() {
+        all_modules.extend(module::scan_directory(&modules_dir));
+    }
+
+    for dir in extra_module_dirs {
+        let found = module::scan_directory(dir);
+        let mut seen = std::collections::HashSet::new();
+        for m in &found {
+            if !seen.insert(normalize(&m.name)) {
+                return Err(Error::Bundle(format!(
+                    "Module conflict: '{}' defined multiple times", m.name
+                )));
+            }
+        }
+        for m in &found {
+            let norm = normalize(&m.name);
+            let in_snapshot = all_modules.iter().any(|e| normalize(&e.name) == norm);
+            let is_forced = force_local.iter().any(|f| normalize(f) == norm);
+
+            if in_snapshot && is_forced {
+                all_modules.retain(|e| normalize(&e.name) != norm);
+            } else if in_snapshot && !is_forced {
+                return Err(Error::Bundle(format!(
+                    "Module conflict: '{}' exists in snapshot and ~/.mage/modules/. Use force_local.",
+                    m.name
+                )));
+            }
+
+            std::fs::create_dir_all(&modules_dir)?;
+            if m.is_dir {
+                let src_dir_path = m.path.parent().unwrap_or(&m.path);
+                copy_dir_all(src_dir_path, &modules_dir.join(&m.name))?;
+            } else {
+                std::fs::copy(&m.path, modules_dir.join(format!("{}.rs", m.name)))?;
+            }
+        }
+        all_modules.extend(found);
+    }
+
+    if !all_modules.is_empty() {
+        let ctx = crate::bundle::RenderContext { modules: &all_modules };
+        std::fs::write(src_dir.join("main.rs"), MageTemplate.render_main(&ctx)?)?;
+    }
+
+    std::fs::write(src_dir.join("snapshot.tar.zst"), data)?;
+    rewrite_cargo_toml_for_snapshot(&staging)?;
+
+    // Generate lockfile.
+    let toolchain = Toolchain::resolve_system()?;
+    let cargo_path = toolchain.cargo_path.clone();
+
+    let _ = std::process::Command::new(&cargo_path)
+        .arg("generate-lockfile")
+        .current_dir(&staging)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    if staging.join("Cargo.lock").exists() {
+        write_fresh_snapshot(&staging)?;
+    }
+
+    Ok((staging, cargo_path))
 }
 
 /// Extract a snapshot archive to a directory.
