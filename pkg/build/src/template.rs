@@ -121,7 +121,7 @@ impl MageBuild {
         Self {
             workspace_root: workspace_root.into(),
             extension_dirs: Vec::new(),
-            name: "mage".into(),
+            name: "mage-bin".into(),
             config: None,
         }
     }
