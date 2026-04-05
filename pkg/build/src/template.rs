@@ -299,24 +299,50 @@ pub fn compile_from_snapshot_data(
         std::fs::rename(&modules_src, src_dir.join("modules"))?;
     }
 
-    // Scan extra module dirs and copy new modules into src/modules/
-    let mut extra_modules = Vec::new();
+    // Collect all modules: snapshot modules + user modules.
+    // User modules override snapshot modules with the same name.
+    let modules_dir = src_dir.join("modules");
+
+    // 1. Parse snapshot modules (already extracted to src/modules/).
+    let mut all_modules: Vec<module::Module> = Vec::new();
+    if modules_dir.is_dir() {
+        all_modules.extend(module::scan_directory(&modules_dir));
+    }
+
+    // 2. Scan user module dirs. Override snapshot modules by name.
     for dir in extra_module_dirs {
         let found = module::scan_directory(dir);
         for m in &found {
-            eprintln!("  found module: {} ({})", m.name, m.path.display());
-            // Copy to src/modules/
-            let modules_dir = src_dir.join("modules");
+            // Check for conflict with another user module (error).
+            let user_conflict = found.iter()
+                .filter(|other| other.name == m.name)
+                .count();
+            if user_conflict > 1 {
+                return Err(Error::Bundle(format!(
+                    "Module conflict: '{}' defined multiple times in user modules",
+                    m.name
+                )));
+            }
+
+            // Override snapshot module with same name.
+            if let Some(pos) = all_modules.iter().position(|existing| existing.name == m.name) {
+                eprintln!("  upgrading module: {} (overrides snapshot)", m.name);
+                all_modules.remove(pos);
+            } else {
+                eprintln!("  new module: {}", m.name);
+            }
+
+            // Copy to src/modules/.
             std::fs::create_dir_all(&modules_dir)?;
             let dest = modules_dir.join(format!("{}.rs", m.name));
             std::fs::copy(&m.path, &dest)?;
         }
-        extra_modules.extend(found);
+        all_modules.extend(found);
     }
 
-    // If we have extra modules, re-render main.rs to include them
-    if !extra_modules.is_empty() {
-        let ctx = crate::bundle::RenderContext { modules: &extra_modules };
+    // Re-render main.rs with the complete module list.
+    if !all_modules.is_empty() {
+        let ctx = crate::bundle::RenderContext { modules: &all_modules };
         let main_source = MageTemplate.render_main(&ctx)?;
         std::fs::write(src_dir.join("main.rs"), main_source)?;
     }

@@ -22,10 +22,11 @@ impl Module for RecompileModule {
         vec![ToolDef {
             schema: llm::Tool {
                 name: "Recompile".into(),
-                description: "Recompile the agent binary with any new or modified modules \
-                    from ~/.mage/modules/. After compilation under \
-                    the monitor, the agent process restarts with the new binary. Use after \
-                    writing a new module file.".into(),
+                description: "Recompile the agent binary with modules from ~/.mage/modules/. \
+                    User modules override snapshot modules with the same name. \
+                    After compilation under the monitor, the agent process restarts \
+                    with the new binary. Use after writing a new module file to \
+                    ~/.mage/modules/.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {},
