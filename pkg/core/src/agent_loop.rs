@@ -178,7 +178,9 @@ impl AgentLoop {
         followup: &mut VecDeque<Message>,
     ) {
         match cmd {
-            LoopCommand::InjectMessage(msg) => self.messages.push(msg),
+            // During a run, injected messages become follow-ups so they
+            // trigger a new turn after the current one completes.
+            LoopCommand::InjectMessage(msg) => followup.push_back(msg),
             LoopCommand::SteerMessage(msg) => steer.push_back(msg),
             LoopCommand::FollowUpMessage(msg) => followup.push_back(msg),
             LoopCommand::Abort => run_cancel.cancel(),
