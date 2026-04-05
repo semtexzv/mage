@@ -554,22 +554,22 @@ impl mage_tui::App for MageTui {
                 Widget::Info(text) => text.render(r),
             }
         }
-        // Queued messages (grayed out, below streaming output).
+        // Spacer: push chrome to bottom. Placed after log but before
+        // queued messages so log lines never shift positions.
+        let content_lines = r.line_count();
+        let chrome_lines = 6; // blank + spinner + hr + editor + hr + status
+        let queued_lines = self.queued.len() * 4; // rough estimate per queued msg
+        let term_h = r.height() as usize;
+        let spacer = term_h.saturating_sub(content_lines + queued_lines + chrome_lines);
+        for _ in 0..spacer {
+            r.push_blank();
+        }
+
+        // Queued messages (grayed out, below spacer).
         for (_raw, widget) in &mut self.queued {
             if !first { r.push_blank(); }
             first = false;
             widget.render(r);
-        }
-
-        // Spacer: fill the gap between content and chrome so the
-        // editor sits at the bottom of the terminal. Placed BELOW
-        // the log so content lines never shift positions.
-        let content_lines = r.line_count();
-        let chrome_lines = 6; // blank + spinner + hr + editor + hr + status
-        let term_h = r.height() as usize;
-        let spacer = term_h.saturating_sub(content_lines + chrome_lines);
-        for _ in 0..spacer {
-            r.push_blank();
         }
 
         // Chrome: blank + spinner/blank + hr + editor + hr + status
