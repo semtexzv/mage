@@ -212,8 +212,6 @@ struct MageTui {
     hr: HRule,
     spinner: Text,
     status: Text,
-    /// Content line count from last frame (for spacer calculation).
-    last_log_lines: usize,
     /// Messages queued while agent is running. Rendered grayed out.
     /// Stores (raw_text, styled_widget).
     queued: Vec<(String, Text)>,
@@ -273,7 +271,6 @@ impl MageTui {
             hr: HRule::new('─', FG_BORDER),
             spinner: Text::empty(),
             status: Text::empty(),
-            last_log_lines: 0,
             queued: Vec::new(),
         };
         tui.rebuild_status();
@@ -517,21 +514,6 @@ impl MageTui {
         None
     }
 
-    /// Count how many terminal lines the bottom chrome occupies.
-    fn count_chrome_lines(&mut self, width: u16) -> usize {
-        // blank + spinner/blank + hr + editor + hr + status
-        let mut count = 0usize;
-        count += 1; // blank
-        count += 1; // spinner or blank
-        count += 1; // hr
-        // Editor: typically 1 line. Multi-line editing is rare.
-        let _ = width;
-        count += 1;
-        count += 1; // hr
-        count += 1; // status
-        count
-    }
-
     fn update_widths(&mut self, w: u16) {
         if w == self.width {
             return;
@@ -554,30 +536,9 @@ impl mage_tui::App for MageTui {
     fn render(&mut self, r: &mut Renderer) {
         self.update_widths(r.width());
 
-        // Measure chrome height by rendering it into a temporary counter.
-        // Chrome = blank + spinner/blank + hr + editor + hr + status.
-        let chrome_lines = self.count_chrome_lines(r.width());
-
-        // Spacer: push editor to the bottom when the log is short.
-        // Uses last frame's log line count. This can overshoot by a few lines
-        // when content grows, which is fine — the terminal just scrolls.
-        // We cap the spacer to avoid massive gaps.
-        let term_h = r.height() as usize;
-        let spacer = if self.last_log_lines == 0 && self.log.is_empty() {
-            // First frame with no content: fill to push editor to bottom.
-            term_h.saturating_sub(chrome_lines)
-        } else {
-            // Subsequent frames: spacer based on last measurement.
-            // If log grew, spacer may be too large (frame > term_h).
-            // That causes terminal scroll, which is natural.
-            term_h.saturating_sub(self.last_log_lines + chrome_lines)
-        };
-        for _ in 0..spacer {
-            r.push_blank();
-        }
-
         // Chat log — each widget separated by a blank line.
-        let log_start = r.line_count();
+        // No spacer: content starts at the top and grows downward.
+        // Old content scrolls into terminal scrollback naturally.
         let mut first = true;
         for entry in &mut self.log {
             if !first {
@@ -599,8 +560,6 @@ impl mage_tui::App for MageTui {
             first = false;
             widget.render(r);
         }
-
-        self.last_log_lines = r.line_count() - log_start;
 
         // Chrome: blank + spinner/blank + hr + editor + hr + status
         r.push_blank();

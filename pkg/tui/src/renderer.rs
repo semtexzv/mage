@@ -259,7 +259,11 @@ impl Renderer {
         let is_first = self.prev_lines.is_empty() && self.prev_width == 0;
         let width_changed = !is_first && w != self.prev_width;
 
-        if is_first || width_changed {
+        if is_first {
+            // First frame: just output, no clearing. Content starts at current cursor.
+            self.full_render(term, &lines, w, th, false);
+        } else if width_changed {
+            // Width changed: must repaint everything (wrapping changes).
             self.full_render(term, &lines, w, th, true);
         } else {
             self.diff_render(term, &lines, w, th);
