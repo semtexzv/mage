@@ -271,10 +271,13 @@ impl ModuleResolver {
     }
 }
 
-/// Scan a directory for `.rs` modules. Returns empty vec if dir doesn't exist.
+/// Scan a directory for modules. Returns empty vec if dir doesn't exist.
 ///
-/// This is a convenience for bootstrap — scans one directory (non-recursively)
-/// for `.rs` files, parses each, and returns successfully parsed modules.
+/// Discovers three forms:
+/// 1. `name.rs` — single-file module
+/// 2. `name/mod.rs` — directory module (entire directory is copied)
+/// 3. `name/lib.rs` — directory module (alternative to mod.rs)
+///
 /// Parse failures are printed to stderr and skipped.
 pub fn scan_directory(dir: &Path) -> Vec<Module> {
     let mut modules = Vec::new();
@@ -284,7 +287,9 @@ pub fn scan_directory(dir: &Path) -> Vec<Module> {
     for entry in entries {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "rs") {
+
+        if path.is_file() && path.extension().is_some_and(|e| e == "rs") {
+            // Single-file module: name.rs
             let name = path
                 .file_stem()
                 .unwrap_or_default()
@@ -293,6 +298,33 @@ pub fn scan_directory(dir: &Path) -> Vec<Module> {
                 Ok(m) => modules.push(m),
                 Err(e) => {
                     eprintln!("  warning: failed to parse {}: {e}", path.display());
+                }
+            }
+        } else if path.is_dir() {
+            // Directory module: name/mod.rs or name/lib.rs
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let mod_rs = path.join("mod.rs");
+            let lib_rs = path.join("lib.rs");
+            let entry_file = if mod_rs.is_file() {
+                Some(mod_rs)
+            } else if lib_rs.is_file() {
+                Some(lib_rs)
+            } else {
+                None
+            };
+            if let Some(entry_file) = entry_file {
+                match Module::parse_file(&entry_file, &name) {
+                    Ok(mut m) => {
+                        m.is_dir = true;
+                        modules.push(m);
+                    }
+                    Err(e) => {
+                        eprintln!("  warning: failed to parse {}: {e}", entry_file.display());
+                    }
                 }
             }
         }

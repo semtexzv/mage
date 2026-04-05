@@ -35,9 +35,13 @@ impl Template for MageTemplate {
         for m in ctx.modules {
             let mod_name = m.name.replace('-', "_");
             if m.init.is_some() {
+                let path_attr = if m.is_dir {
+                    format!("modules/{}/mod.rs", m.name)
+                } else {
+                    format!("modules/{}.rs", m.name)
+                };
                 mod_decls.push_str(&format!(
-                    "#[path = \"modules/{}.rs\"]\nmod {mod_name};\n",
-                    m.name
+                    "#[path = \"{path_attr}\"]\nmod {mod_name};\n",
                 ));
                 mod_calls.push_str(&format!(
                     "    modules.extend({mod_name}::modules());\n"
@@ -357,8 +361,15 @@ pub fn compile_from_snapshot_data(
 
             // Copy to src/modules/.
             std::fs::create_dir_all(&modules_dir)?;
-            let dest = modules_dir.join(format!("{}.rs", m.name));
-            std::fs::copy(&m.path, &dest)?;
+            if m.is_dir {
+                // Directory module: copy entire directory.
+                let src_dir_path = m.path.parent().unwrap_or(&m.path);
+                let dest_dir = modules_dir.join(&m.name);
+                copy_dir_all(src_dir_path, &dest_dir)?;
+            } else {
+                let dest = modules_dir.join(format!("{}.rs", m.name));
+                std::fs::copy(&m.path, &dest)?;
+            }
         }
         all_modules.extend(found);
     }
@@ -622,6 +633,23 @@ pub fn rewrite_crate_internal_deps(
         let new_content = toml::to_string_pretty(&doc)
             .map_err(|e| Error::Bundle(format!("serialize {}: {e}", cargo_toml.display())))?;
         std::fs::write(cargo_toml, new_content)?;
+    }
+    Ok(())
+}
+
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| Error::Bundle(format!("read dir {}: {e}", src.display())))?
+    {
+        let entry = entry.map_err(|e| Error::Bundle(format!("dir entry: {e}")))?;
+        let dest = dst.join(entry.file_name());
+        let meta = entry.metadata().map_err(|e| Error::Bundle(format!("metadata: {e}")))?;
+        if meta.is_dir() {
+            copy_dir_all(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), dest)?;
+        }
     }
     Ok(())
 }
