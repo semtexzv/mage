@@ -278,9 +278,13 @@ pub fn render_select_list(list: &SelectList, width: usize) -> Vec<String> {
 
     let mut lines = Vec::with_capacity(visible_count + 2);
 
-    // Top scroll indicator.
+    // 1-char padding on left and right.
+    let inner_w = width.saturating_sub(2);
+
+    // Top padding + scroll indicator.
+    lines.push(String::new());
     if start > 0 {
-        lines.push(format!("{dsc_fg} ↑ {} more{RESET}", start));
+        lines.push(format!("{dsc_fg}  ↑ {} more{RESET}", start));
     }
 
     for vi in start..end {
@@ -296,25 +300,26 @@ pub fn render_select_list(list: &SelectList, width: usize) -> Vec<String> {
         let desc = if item.description.is_empty() {
             String::new()
         } else {
-            let avail = width.saturating_sub(max_label_w + gap + 1);
+            let avail = inner_w.saturating_sub(max_label_w + gap + 1);
             truncate_str(&item.description, avail)
         };
 
         if is_selected {
-            let content = format!("{dlabel}{gap_str}{dsc_fg}{desc}");
+            let content = format!(" {dlabel}{gap_str}{dsc_fg}{desc}");
             let content_w = visible_width(&content);
-            let fill = " ".repeat(width.saturating_sub(content_w));
-            lines.push(format!("{hl_bg}{hl_fg}{content}{fill}{RESET}"));
+            let fill = " ".repeat(width.saturating_sub(content_w).saturating_sub(1));
+            lines.push(format!("{hl_bg}{hl_fg}{content}{fill} {RESET}"));
         } else {
-            lines.push(format!("{lbl_fg}{dlabel}{RESET}{gap_str}{dsc_fg}{desc}{RESET}"));
+            lines.push(format!(" {lbl_fg}{dlabel}{RESET}{gap_str}{dsc_fg}{desc}{RESET}"));
         }
     }
 
-    // Bottom scroll indicator.
+    // Bottom scroll indicator + padding.
     let remaining = list.filtered.len().saturating_sub(end);
     if remaining > 0 {
-        lines.push(format!("{dsc_fg} ↓ {} more{RESET}", remaining));
+        lines.push(format!("{dsc_fg}  ↓ {} more{RESET}", remaining));
     }
+    lines.push(String::new());
 
     lines
 }
