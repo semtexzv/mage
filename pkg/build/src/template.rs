@@ -121,6 +121,13 @@ const CORE_CRATES: &[&str] = &[
     "providers/anthropic",
 ];
 
+/// Log callback for build progress.
+pub type LogFn = std::rc::Rc<dyn Fn(&str)>;
+
+fn stderr_log() -> LogFn {
+    std::rc::Rc::new(|msg| eprintln!("{msg}"))
+}
+
 /// Unified mage compilation.
 ///
 /// All three paths (xtask bootstrap, `mage bootstrap`, Recompile tool)
@@ -134,6 +141,8 @@ pub struct MageBuild {
     name: String,
     /// Override the approot (default: `~/.mage`).
     config: Option<Config>,
+    /// Log callback.
+    log: LogFn,
 }
 
 impl MageBuild {
@@ -144,7 +153,15 @@ impl MageBuild {
             extension_dirs: Vec::new(),
             name: "mage-bin".into(),
             config: None,
+            log: stderr_log(),
         }
+    }
+
+    /// Set a custom log callback for build progress.
+    pub fn with_log(mut self, log: impl Into<LogFn>) -> Self {
+        let log = log.into();
+        self.log = log;
+        self
     }
 
     /// Set the bundle name (default: `"mage"`).
@@ -180,9 +197,9 @@ impl MageBuild {
 
     /// Compile and return the result.
     pub fn compile(self) -> Result<CompilationResult> {
+        let log = &self.log;
         let root = &self.workspace_root;
 
-        // Verify workspace exists.
         if !root.join("Cargo.toml").exists() {
             return Err(Error::Bundle(format!(
                 "workspace root not found: {}",
@@ -190,20 +207,18 @@ impl MageBuild {
             )));
         }
 
-        // Scan extension directories.
         let mut modules = Vec::new();
         for dir in &self.extension_dirs {
             let found = module::scan_directory(dir);
             for m in &found {
-                eprintln!("  found module: {} ({})", m.name, m.path.display());
+                log(&format!("found module: {} ({})", m.name, m.path.display()));
             }
             modules.extend(found);
         }
         if modules.is_empty() {
-            eprintln!("  no extension modules found (built-in tools are always included)");
+            log("no extension modules (built-in tools always included)");
         }
 
-        // Assemble bundle.
         let config = self.config.unwrap_or_default();
         let mut bundle = Bundle::new(&self.name).with_config(config);
 
@@ -218,22 +233,17 @@ impl MageBuild {
 
         let toolchain = Toolchain::resolve_system()?;
         let cargo_path = toolchain.cargo_path.clone();
-        eprintln!(
-            "toolchain: {} / {}",
-            toolchain.rustc_path.display(),
-            toolchain.cargo_path.display()
-        );
+        log(&format!("toolchain: {}", toolchain.rustc_path.display()));
         bundle = bundle.with_toolchain(toolchain);
 
-        eprintln!("generating workspace...");
+        log("generating workspace...");
         bundle.generate()?;
 
         let hash = bundle.content_hash()?;
-        eprintln!("content hash: {}", &hash[..12]);
+        log(&format!("content hash: {}", &hash[..12]));
 
-        // Generate Cargo.lock without compiling, then write the complete snapshot.
         let workspace_dir = bundle.config.approot.join("workspaces").join(&bundle.id);
-        eprintln!("resolving dependencies...");
+        log("resolving dependencies...");
         let lock_status = std::process::Command::new(&cargo_path)
             .arg("generate-lockfile")
             .current_dir(&workspace_dir)
@@ -244,7 +254,7 @@ impl MageBuild {
             }
         }
 
-        eprintln!("compiling...");
+        log("compiling...");
         bundle.compile()
     }
 }
@@ -286,13 +296,15 @@ pub fn compile_from_snapshot_data(
     data: &[u8],
     extra_module_dirs: &[PathBuf],
     force_local: &[String],
+    log: &dyn Fn(&str),
 ) -> Result<CompilationResult> {
     let staging = std::env::temp_dir().join("mage").join(format!("rebuild-{}", std::process::id()));
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
     }
 
-    eprintln!("extracting snapshot to {}...", staging.display());
+    log(&format!("extracting snapshot to {}...", staging.display()));
+
     extract_snapshot(data, &staging)?;
 
     // Lay out as a proper cargo project: src/main.rs, src/modules/
@@ -347,7 +359,7 @@ pub fn compile_from_snapshot_data(
             if in_snapshot && is_forced {
                 // Forced override — replace snapshot version.
                 all_modules.retain(|existing| normalize(&existing.name) != norm);
-                eprintln!("  upgrading module: {} (force_local)", m.name);
+                log(&format!("upgrading module: {} (force_local)", m.name));
             } else if in_snapshot && !is_forced {
                 // Conflict — snapshot has it, user has it, not forced.
                 return Err(Error::Bundle(format!(
@@ -356,7 +368,7 @@ pub fn compile_from_snapshot_data(
                     m.name
                 )));
             } else {
-                eprintln!("  new module: {}", m.name);
+                log(&format!("new module: {}", m.name));
             }
 
             // Copy to src/modules/.
@@ -391,14 +403,9 @@ pub fn compile_from_snapshot_data(
 
     // Compile
     let toolchain = Toolchain::resolve_system()?;
-    eprintln!(
-        "toolchain: {} / {}",
-        toolchain.rustc_path.display(),
-        toolchain.cargo_path.display()
-    );
+    log(&format!("toolchain: {}", toolchain.rustc_path.display()));
 
-    // Generate Cargo.lock, then write the complete snapshot before compiling.
-    eprintln!("resolving dependencies...");
+    log("resolving dependencies...");
     let lock_status = std::process::Command::new(&toolchain.cargo_path)
         .arg("generate-lockfile")
         .current_dir(&staging)
@@ -409,7 +416,7 @@ pub fn compile_from_snapshot_data(
         }
     }
 
-    eprintln!("compiling from snapshot...");
+    log("compiling...");
     let output = std::process::Command::new(&toolchain.cargo_path)
         .arg("build")
         .arg("--message-format=json")
@@ -419,7 +426,7 @@ pub fn compile_from_snapshot_data(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        eprintln!("{stderr}");
+        log(&stderr);
         return Ok(CompilationResult {
             success: false,
             executable_path: None,
@@ -438,7 +445,7 @@ pub fn compile_from_snapshot_data(
         std::fs::create_dir_all(&dest_dir)?;
         let dest = dest_dir.join(bin.file_name().unwrap_or_default());
         std::fs::copy(bin, &dest)?;
-        eprintln!("binary: {}", dest.display());
+        log(&format!("binary: {}", dest.display()));
         Some(dest)
     } else {
         None

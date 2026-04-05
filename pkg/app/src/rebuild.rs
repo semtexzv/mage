@@ -26,7 +26,7 @@ pub fn run_rebuild() {
             eprintln!("error: no embedded snapshot and no workspace found");
             std::process::exit(1);
         }
-        mage_build::template::compile_from_snapshot_data(snapshot, &module_dirs, &[])
+        mage_build::template::compile_from_snapshot_data(snapshot, &module_dirs, &[], &|msg| eprintln!("{msg}"))
     };
 
     let result = match result {

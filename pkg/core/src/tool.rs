@@ -75,6 +75,11 @@ impl ToolContext {
         });
     }
 
+    /// Get a clone of the update sender for use in closures.
+    pub fn update_sender(&self) -> tokio::sync::mpsc::UnboundedSender<ToolUpdate> {
+        self.update_tx.clone()
+    }
+
     /// Access the loop handle for injecting/steering messages.
     pub fn loop_handle(&self) -> &LoopHandle {
         &self.loop_handle

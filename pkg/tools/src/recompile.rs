@@ -59,12 +59,26 @@ impl ToolHandler for RecompileHandler {
 
         let module_dirs = standard_module_dirs();
 
-        ctx.send_text("Compiling...");
+        // Build a log callback that accumulates lines and sends the
+        // last N to the tool widget as the current view.
+        let log_lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let update_tx = ctx.update_sender();
+        let log: mage_build::template::LogFn = {
+            let log_lines = log_lines.clone();
+            std::rc::Rc::new(move |msg: &str| {
+                let mut lines = log_lines.borrow_mut();
+                lines.push(msg.to_string());
+                let start = lines.len().saturating_sub(8);
+                let view = lines[start..].join("\n");
+                let _ = update_tx.send(mage_core::types::ToolUpdate { text: view });
+            })
+        };
 
         // Try workspace first, then snapshot
         let result = if let Some(root) = mage_build::template::find_workspace_root() {
             mage_build::template::MageBuild::new(&root)
                 .standard_extension_dirs()
+                .with_log(log.clone())
                 .compile()
         } else {
             let snapshot = mage_core::upgrade::get_snapshot();
@@ -74,7 +88,7 @@ impl ToolHandler for RecompileHandler {
                 );
             }
             mage_build::template::compile_from_snapshot_data(
-                snapshot, &module_dirs, &force_local,
+                snapshot, &module_dirs, &force_local, &*log,
             )
         };
 
