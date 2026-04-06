@@ -296,8 +296,8 @@ pub fn scan_directory(dir: &Path) -> Vec<Module> {
                 .to_string_lossy();
             match Module::parse_file(&path, &name) {
                 Ok(m) => modules.push(m),
-                Err(e) => {
-                    eprintln!("  warning: failed to parse {}: {e}", path.display());
+                Err(_e) => {
+                    // Silently skip unparseable files.
                 }
             }
         } else if path.is_dir() {
@@ -322,8 +322,8 @@ pub fn scan_directory(dir: &Path) -> Vec<Module> {
                         m.is_dir = true;
                         modules.push(m);
                     }
-                    Err(e) => {
-                        eprintln!("  warning: failed to parse {}: {e}", entry_file.display());
+                    Err(_e) => {
+                        // Silently skip unparseable modules.
                     }
                 }
             }

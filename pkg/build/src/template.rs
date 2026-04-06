@@ -673,7 +673,7 @@ fn write_fresh_snapshot(staging: &std::path::Path) -> Result<()> {
         .map_err(|e| Error::Bundle(format!("zstd finish: {e}")))?;
 
     let size = std::fs::metadata(&snapshot_path)?.len();
-    eprintln!("snapshot: {} ({:.1} MB)", snapshot_path.display(), size as f64 / 1_048_576.0);
+    // No eprintln — callers handle logging.
 
     Ok(())
 }
@@ -791,10 +791,7 @@ pub fn rewrite_crate_internal_deps(
                         ));
                         changed = true;
                     } else {
-                        eprintln!(
-                            "  warning: {} depends on '{}' which is not in snapshot crates/",
-                            cargo_toml.display(), pkg_name
-                        );
+                        // External dep — not in crates/, that's normal.
                     }
                 }
             }
