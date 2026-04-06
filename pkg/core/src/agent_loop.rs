@@ -296,6 +296,12 @@ impl AgentLoop {
                 });
                 turn_index += 1;
 
+                // If an upgrade was signaled (Recompile tool), stop immediately.
+                // Don't make another LLM call — exit after this turn.
+                if crate::upgrade::is_upgrade_pending() {
+                    break 'outer;
+                }
+
                 // After tool calls: pull steering messages for the next inner iteration.
                 self.pull_commands(&run_cancel);
                 pending = self.steering.drain(..).collect();
