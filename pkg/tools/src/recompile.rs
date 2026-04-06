@@ -58,20 +58,29 @@ impl ToolHandler for RecompileHandler {
             })
             .unwrap_or_default();
 
-        // Log helper: accumulates lines, sends last 8 as the tool view.
-        let mut log_lines: Vec<String> = Vec::new();
-        let log_and_send = |lines: &mut Vec<String>, msg: &str, ctx: &ToolContext| {
-            lines.push(msg.to_string());
-            let start = lines.len().saturating_sub(8);
-            ctx.send_text(lines[start..].join("\n"));
+        // Log callback: accumulates lines, sends last 8 as the tool view.
+        let log_lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let update_tx = ctx.update_sender();
+        let build_log: mage_build::template::LogFn = {
+            let log_lines = log_lines.clone();
+            std::rc::Rc::new(move |msg: &str| {
+                let mut lines = log_lines.borrow_mut();
+                lines.push(msg.to_string());
+                let start = lines.len().saturating_sub(8);
+                let view = lines[start..].join("\n");
+                let _ = update_tx.send(mage_core::types::ToolUpdate { text: view });
+            })
         };
 
+        let log_msg = |msg: &str| { build_log(msg); };
+
         // Step 1: Generate workspace (sync — fast, just file I/O).
-        log_and_send(&mut log_lines, "preparing workspace...", &ctx);
+        log_msg("preparing workspace...");
 
         let (workspace_dir, cargo_path) = if let Some(root) = mage_build::template::find_workspace_root() {
             match mage_build::template::MageBuild::new(&root)
                 .standard_extension_dirs()
+                .with_log(build_log.clone())
                 .generate_workspace()
             {
                 Ok(r) => r,
@@ -93,7 +102,7 @@ impl ToolHandler for RecompileHandler {
         };
 
         // Step 2: Run cargo build asynchronously, streaming stderr.
-        log_and_send(&mut log_lines, "compiling...", &ctx);
+        log_msg("compiling...");
 
         let mut child = match tokio::process::Command::new(&cargo_path)
             .arg("build")
@@ -114,7 +123,7 @@ impl ToolHandler for RecompileHandler {
                 // Filter out JSON diagnostic lines (they're noisy).
                 if !line.starts_with('{') {
                     let clean = line.replace('\t', "    ");
-                    log_and_send(&mut log_lines, &clean, &ctx);
+                    log_msg(&clean);
                 }
             }
         }
@@ -125,7 +134,7 @@ impl ToolHandler for RecompileHandler {
         };
 
         if !status.success() {
-            let msg = log_lines.join("\n");
+            let msg = log_lines.borrow().join("\n");
             let truncated = if msg.len() > 3000 {
                 format!("...(truncated)\n{}", &msg[msg.len() - 3000..])
             } else {
@@ -148,7 +157,7 @@ impl ToolHandler for RecompileHandler {
             None => return ToolResult::failure("Compilation succeeded but no binary found"),
         };
 
-        log_and_send(&mut log_lines, &format!("binary: {}", path.display()), &ctx);
+        log_msg(&format!("binary: {}", path.display()));
 
         match mage_core::upgrade::signal_upgrade(&path) {
             Ok(mage_core::upgrade::UpgradeSignal::Ready) => {

@@ -45,7 +45,10 @@ pub fn run_monitor() -> ExitCode {
                 };
             }
             SpawnResult::Upgrade(new_binary) => {
-                eprintln!("[monitor] upgrading to: {}", new_binary.display());
+                // Clear terminal between old and new binary.
+                print!("\x1b[2J\x1b[H\x1b[3J");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
                 if !new_binary.exists() {
                     eprintln!(
                         "[monitor] error: new binary does not exist: {}",
