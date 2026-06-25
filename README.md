@@ -51,7 +51,7 @@ pkg/build             the compilation engine — snapshot bundling, templating, 
 pkg/tui               differential terminal renderer, markdown, editor
 pkg/app               run loop, monitor, rebuild/snapshot subcommands, credentials
 pkg/sdk               re-export crate for module authors
-providers/anthropic   Anthropic Messages API — SSE streaming, OAuth
+providers/anthropic   Anthropic Messages API — SSE streaming, API-key auth
 ```
 
 Some highlights:

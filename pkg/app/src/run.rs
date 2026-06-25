@@ -1,9 +1,8 @@
 //! Default application entry point.
 //!
-//! Wires up the Anthropic provider, credentials, model defaults, agent loop,
+//! Wires up the Anthropic provider, model defaults, agent loop,
 //! and TUI. This is the function that the generated `main.rs` calls.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use refstr::Str;
@@ -199,40 +198,10 @@ fn setup_provider() -> (
     Vec<llm::Model>,
     llm::Model,
 ) {
-    let cred_path = crate::credentials::default_path();
-    let oauth_slot: Rc<RefCell<Option<anthropic::oauth::OAuthCredentials>>> =
-        Rc::new(RefCell::new(None));
+    let mut provider = anthropic::AnthropicProvider::new();
 
-    if let Some(ref path) = cred_path {
-        let store = crate::credentials::load(path);
-        if let Some(crate::credentials::Credential::OAuth {
-            refresh_token,
-            access_token,
-            expires_at_ms,
-        }) = store.get("anthropic")
-        {
-            *oauth_slot.borrow_mut() = Some(anthropic::oauth::OAuthCredentials {
-                refresh_token: refresh_token.clone(),
-                access_token: access_token.clone(),
-                expires_at_ms: *expires_at_ms,
-            });
-        }
-    }
-
-    let mut provider =
-        anthropic::AnthropicProvider::new().with_oauth_shared(oauth_slot.clone());
-
-    // Check for Pi's auth file — re-read on every request for live token sharing.
-    let pi_auth = dirs::home_dir().map(|h| h.join(".pi/agent/auth.json"));
-    if let Some(ref path) = pi_auth {
-        if path.exists() {
-            provider = provider.with_credential_file(path);
-        }
-    }
-
-    // Env vars take priority over everything.
+    // Authenticate with ANTHROPIC_API_KEY if present.
     if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-        *oauth_slot.borrow_mut() = None;
         provider = provider.with_api_key(&api_key);
     }
 
@@ -250,21 +219,10 @@ fn setup_provider() -> (
 }
 
 fn make_cred_save_callback(
-    provider: &Rc<anthropic::AnthropicProvider>,
+    _provider: &Rc<anthropic::AnthropicProvider>,
 ) -> Option<Rc<dyn Fn()>> {
-    let cred_path = crate::credentials::default_path()?;
-    let oauth_slot = provider.oauth_slot().clone();
-    Some(Rc::new(move || {
-        if let Some(ref creds) = *oauth_slot.borrow() {
-            let _ = crate::credentials::save_oauth(
-                &cred_path,
-                "anthropic",
-                &creds.refresh_token,
-                &creds.access_token,
-                creds.expires_at_ms,
-            );
-        }
-    }) as Rc<dyn Fn()>)
+    // API-key auth has no refreshable credentials to persist.
+    None
 }
 
 fn summarize_args(args: &serde_json::Value) -> String {

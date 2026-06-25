@@ -33,7 +33,7 @@ fn build_request_body_basic() {
         tools: None,
     };
     let options = StreamOptions::default();
-    let body = build_request_body(&model, &context, &options, false);
+    let body = build_request_body(&model, &context, &options);
 
     assert_eq!(body.model, "claude-sonnet-4-20250514");
     assert_eq!(body.stream, Some(true));
@@ -107,7 +107,7 @@ fn tool_result_batching() {
         tools: None,
     };
     let options = StreamOptions::default();
-    let body = build_request_body(&model, &context, &options, false);
+    let body = build_request_body(&model, &context, &options);
 
     // Assistant message + one batched user message with 2 tool_results
     assert_eq!(body.messages.len(), 2);

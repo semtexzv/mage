@@ -11,30 +11,21 @@ use crate::api_types::{
     InputSchema, MessageContent, MessageParam, MessageRole, TextBlockParam,
     ThinkingConfig, ToolDef, ToolResultContent, ToolResultContentBlock,
 };
-use crate::oauth;
-
 /// Build the Anthropic API request body from our types.
-///
-/// When `is_oauth` is true (Claude Pro/Max subscription), the request is
-/// shaped to match Claude Code exactly:
-/// - System prompt has the CC identity prepended as the first block
-/// - Tool names are remapped to CC canonical casing
-/// - Assistant-turn tool_use names are remapped
 pub fn build_request_body(
     model: &Model,
     context: &Context,
     options: &StreamOptions,
-    is_oauth: bool,
 ) -> CreateMessageRequest {
     let max_tokens = options.max_out
         .unwrap_or_else(|| model.max_out / 3);
 
-    let system = build_system(context.system_prompt.as_deref(), options, is_oauth);
+    let system = build_system(context.system_prompt.as_deref(), options);
 
-    let messages = convert_messages(&context.messages, is_oauth);
+    let messages = convert_messages(&context.messages);
 
     let tools = context.tools.as_ref().and_then(|t| {
-        if t.is_empty() { None } else { Some(convert_tools(t, is_oauth)) }
+        if t.is_empty() { None } else { Some(convert_tools(t)) }
     });
 
     let thinking = options.reasoning.as_ref().map(|_| {
@@ -57,33 +48,15 @@ pub fn build_request_body(
     }
 }
 
-/// Build the system prompt blocks.
-///
-/// OAuth mode: CC identity block first, then the user's system prompt (if any).
-/// API key mode: just the user's system prompt (if any).
+/// Build the system prompt blocks from the user's system prompt (if any).
 fn build_system(
     system_prompt: Option<&str>,
     options: &StreamOptions,
-    is_oauth: bool,
 ) -> Option<Vec<TextBlockParam>> {
     let cache_control = options.cache_retention.map(|_| CacheControl::ephemeral());
-
-    if is_oauth {
-        let mut blocks = vec![
-            TextBlockParam::new(
-                oauth::CLAUDE_CODE_SYSTEM_PROMPT.to_string(),
-                cache_control.clone(),
-            ),
-        ];
-        if let Some(prompt) = system_prompt {
-            blocks.push(TextBlockParam::new(prompt.to_string(), cache_control));
-        }
-        Some(blocks)
-    } else {
-        system_prompt.map(|prompt| {
-            vec![TextBlockParam::new(prompt.to_string(), cache_control)]
-        })
-    }
+    system_prompt.map(|prompt| {
+        vec![TextBlockParam::new(prompt.to_string(), cache_control)]
+    })
 }
 
 fn try_batch_tool_result(result: &mut Vec<MessageParam>, block: &ContentBlockParam) -> bool {
@@ -95,7 +68,7 @@ fn try_batch_tool_result(result: &mut Vec<MessageParam>, block: &ContentBlockPar
     true
 }
 
-fn convert_messages(messages: &[Message], is_oauth: bool) -> Vec<MessageParam> {
+fn convert_messages(messages: &[Message]) -> Vec<MessageParam> {
     let mut result = Vec::new();
 
     for msg in messages {
@@ -106,7 +79,7 @@ fn convert_messages(messages: &[Message], is_oauth: bool) -> Vec<MessageParam> {
                 }
             }
             Message::Assistant(asst) => {
-                let blocks = convert_assistant_content(&asst.content, is_oauth);
+                let blocks = convert_assistant_content(&asst.content);
                 if !blocks.is_empty() {
                     result.push(MessageParam {
                         role: MessageRole::Assistant,
@@ -276,7 +249,7 @@ fn convert_user_message(msg: &UserMessage) -> Option<MessageParam> {
     }
 }
 
-fn convert_assistant_content(content: &[ContentBlock], is_oauth: bool) -> Vec<ContentBlockParam> {
+fn convert_assistant_content(content: &[ContentBlock]) -> Vec<ContentBlockParam> {
     let mut blocks = Vec::new();
     for block in content {
         match block {
@@ -304,14 +277,9 @@ fn convert_assistant_content(content: &[ContentBlock], is_oauth: bool) -> Vec<Co
                 }
             }
             ContentBlock::ToolCall { id, name, arguments, .. } => {
-                let outbound_name = if is_oauth {
-                    oauth::to_cc_tool_name(name).to_string()
-                } else {
-                    name.to_string()
-                };
                 blocks.push(ContentBlockParam::ToolUse {
                     id: id.to_string(),
-                    name: outbound_name,
+                    name: name.to_string(),
                     input: arguments.clone(),
                     cache_control: None,
                 });
@@ -350,7 +318,7 @@ fn convert_user_content_blocks(content: &[UserContent]) -> ToolResultContent {
     }).collect())
 }
 
-fn convert_tools(tools: &[Tool], is_oauth: bool) -> Vec<ToolDef> {
+fn convert_tools(tools: &[Tool]) -> Vec<ToolDef> {
     tools.iter().map(|tool| {
         let params = &tool.parameters;
         let properties = params.get("properties").cloned();
@@ -358,14 +326,8 @@ fn convert_tools(tools: &[Tool], is_oauth: bool) -> Vec<ToolDef> {
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
 
-        let name = if is_oauth {
-            oauth::to_cc_tool_name(&tool.name).to_string()
-        } else {
-            tool.name.to_string()
-        };
-
         ToolDef {
-            name,
+            name: tool.name.to_string(),
             description: Some(tool.description.to_string()),
             input_schema: InputSchema {
                 schema_type: "object",
